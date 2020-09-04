@@ -93,8 +93,9 @@ async fn fill_cmdline_for_matches(procs: &mut HashMap<i32, Process>, pattern: &s
         let path = format!("/proc/{}/cmdline", pid);
         let data = async_fs::read(path).await?;
         let raw_cmdline = String::from_utf8(data).unwrap();
+        println!("raw_cmdline={:?}", raw_cmdline);
         let words: Vec<&str> = raw_cmdline.trim_end_matches('\0').split('\0').collect();
-        let cmdline = if words == vec![""] { String::from("") } else { shellwords::join(&words) };
+        let cmdline = if words == vec![""] { String::from("") } else { shell_words::join(&words) };
         println!("cmdline={:?}", cmdline);
         // let cmdline = cmdline.replace("\0", " ").trim_end().to_string();
         // if re.is_match(&cmdline) {

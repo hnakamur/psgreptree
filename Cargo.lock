@@ -383,14 +383,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26412eb97c6b088a6997e05f69403a802a92d520de2f8e63c2b65f9e0f47c4e8"
 
 [[package]]
-name = "shellwords"
-version = "1.1.0"
+name = "shell-words"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89e515aa4699a88148ed5ef96413ceef0048ce95b43fbc955a33bde0a70fcae6"
-dependencies = [
- "lazy_static",
- "regex",
-]
+checksum = "b6fa3938c99da4914afedd13bf3d79bcb6c277d1b2c398d23257a304d9e1b074"
 
 [[package]]
 name = "signal-hook"
@@ -440,7 +436,7 @@ dependencies = [
  "lazy_static",
  "num_cpus",
  "regex",
- "shellwords",
+ "shell-words",
  "smol",
 ]
 
