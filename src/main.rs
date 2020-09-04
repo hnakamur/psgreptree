@@ -2,26 +2,65 @@
 extern crate lazy_static;
 
 use async_fs::{read_dir, DirEntry};
-use futures_lite::stream::StreamExt;
+use clap::{App, Arg};
+use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
+use std::collections::HashMap;
+use std::io;
+use std::str;
+
+#[derive(Debug)]
+struct Process {
+    pid: i32,
+    cmdline: String,
+}
+
+#[derive(Debug)]
+struct ParentProcess {
+    pid: i32,
+    is_descendant: Option<bool>,
+}
 
 fn main() {
+    let matches = App::new("psgreptree")
+        .version("0.1.0")
+        .author("Kevin K. <kbknapp@gmail.com>")
+        .about("Does awesome things")
+        .arg(
+            Arg::with_name("pattern")
+                .short("r")
+                .long("pattern")
+                .value_name("REGEX")
+                .help("Sets a regular expression to match process command lines")
+                .takes_value(true),
+        )
+        .get_matches();
+    let pattern = matches.value_of("pattern");
+    println!("pattern={:?}", pattern);
+
     std::env::set_var("SMOL_THREADS", format!("{}", num_cpus::get()));
 
     smol::block_on(async {
-        psgrep().await.unwrap();
+        let pids = all_pids().await.unwrap();
+
+        let procs = procs_for_pattern(pids.clone(), pattern.unwrap()).await.unwrap();
+        println!("procs={:?}", procs);
+
+        let parents = child_to_parent_processes(pids.clone()).await.unwrap();
+        println!("parents={:?}", parents);
     });
 }
 
-async fn psgrep() -> std::io::Result<()> {
+async fn all_pids() -> io::Result<Vec<i32>> {
+    let mut pids = Vec::new();
     let mut entries = read_dir("/proc").await?;
     while let Some(res) = entries.next().await {
         let entry = res?;
         if is_pid_entry(&entry) {
-            println!("path={:?}", entry.path());
+            pids.push(entry.file_name().to_str().unwrap().parse::<i32>().unwrap());
         }
     }
-    Ok(())
+    Ok(pids)
 }
 
 fn is_pid_entry(entry: &DirEntry) -> bool {
@@ -29,4 +68,38 @@ fn is_pid_entry(entry: &DirEntry) -> bool {
         static ref PID_RE: Regex = Regex::new(r"^\d+$").unwrap();
     }
     PID_RE.is_match(entry.file_name().to_str().unwrap())
+}
+
+async fn procs_for_pattern(all_pids: Vec<i32>, pattern: &str) -> io::Result<Vec<Process>> {
+    let mut procs = Vec::new();
+    let re = Regex::new(pattern).expect("valid regular expression");
+    let mut s = stream::iter(all_pids);
+    while let Some(pid) = s.next().await {
+        let path = format!("/proc/{}/cmdline", pid);
+        let data = async_fs::read(path).await?;
+        let cmdline = String::from_utf8(data).unwrap();
+        let cmdline = cmdline.replace("\0", " ").trim_end().to_string();
+        if re.is_match(&cmdline) {
+            procs.push(Process{pid, cmdline});
+        }
+    }
+    Ok(procs)
+}
+
+async fn child_to_parent_processes(all_pids: Vec<i32>) -> io::Result<HashMap<i32, ParentProcess>> {
+    lazy_static! {
+        static ref PPID_RE: Regex = Regex::new(r"\) . (\d+)").unwrap();
+    }
+
+    let mut pids = HashMap::new();
+    let mut s = stream::iter(all_pids);
+    while let Some(pid) = s.next().await {
+        let path = format!("/proc/{}/stat", pid);
+        let data = async_fs::read(path).await?;
+        let text = str::from_utf8(&data).unwrap();
+        let caps = PPID_RE.captures(text).unwrap();
+        let ppid = caps.get(1).unwrap().as_str().parse::<i32>().unwrap();
+        pids.insert(pid, ParentProcess{pid: ppid, is_descendant: None});
+    }
+    Ok(pids)
 }
