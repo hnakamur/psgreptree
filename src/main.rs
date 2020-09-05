@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io;
 use std::str;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Process {
     pid: i32,
     ppid: i32,
@@ -40,6 +40,7 @@ fn main() {
     smol::block_on(async {
         let pids = all_pids().await.unwrap();
         let mut procs = all_procs(pids).await.unwrap();
+        let procs = filter_procs(procs, pattern.unwrap());
         println!("procs={:?}", procs);
 
         // fill_cmdline_for_matches(&mut procs, pattern.unwrap())
@@ -115,46 +116,13 @@ async fn get_cmdline(pid: i32) -> io::Result<String> {
     Ok(cmdline)
 }
 
-async fn fill_cmdline_for_matches(
-    procs: &mut HashMap<i32, Process>,
-    pattern: &str,
-) -> io::Result<()> {
+fn filter_procs(mut procs: HashMap<i32, Process>, pattern: &str) -> HashMap<i32, Process> {
     let re = Regex::new(pattern).expect("valid regular expression");
-    let mut s = stream::iter(procs);
-    while let Some((pid, mut proc)) = s.next().await {
-        let path = format!("/proc/{}/cmdline", pid);
-        let data = async_fs::read(path).await?;
-        let raw_cmdline = String::from_utf8(data).unwrap();
-        let cmdline = raw_cmdline.trim_end_matches('\0').replace("\0", " ");
-        println!("cmdline={:?}", cmdline);
-        // let cmdline = cmdline.replace("\0", " ").trim_end().to_string();
-        // if re.is_match(&cmdline) {
-        //     proc.wanted = Some(true);
-        //     proc.cmdline = Some(cmdline);
-        // }
+    let mut filtered = HashMap::new();
+    for (pid, proc) in procs.iter_mut() {
+        if re.is_match(&proc.cmdline) {
+            filtered.insert(*pid, proc.clone());
+        }
     }
-    Ok(())
+    filtered
 }
-
-// fn mark_wanted(procs: &mut HashMap<i32, Process>) {
-//     for proc in procs.values_mut() {
-//         mark_wanted_one(&procs, proc);
-//     }
-// }
-
-// fn mark_wanted_one(procs: &mut HashMap<i32, Process>, proc: &mut Process) {
-//     if proc.ppid == 0 {
-//         proc.wanted = Some(false);
-//         return;
-//     }
-
-//     if let Some(parent_proc) = procs.get_mut(&proc.pid) {
-//         if let Some(parent_wanted) = parent_proc.wanted {
-//             proc.wanted = Some(parent_wanted);
-//             return;
-//         } else {
-//             mark_wanted_one(procs, parent_proc);
-//         }
-//     }
-//     proc.wanted = Some(false)
-// }
