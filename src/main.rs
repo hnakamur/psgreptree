@@ -6,7 +6,7 @@ use clap::{App, Arg};
 use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::str;
 
@@ -39,9 +39,9 @@ fn main() {
     smol::block_on(async {
         let pids = all_pids().await.unwrap();
         let procs = all_procs(pids).await.unwrap();
-        let mut filtered = filter_procs(&procs, pattern.unwrap());
-        add_descendants(&mut filtered, &procs);
-        println!("filtered={:?}", filtered);
+        let matched_pids = match_cmdline(&procs, pattern.unwrap());
+        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
+        println!("wanted_procs={:?}", wanted_procs);
     });
 }
 
@@ -98,39 +98,55 @@ async fn get_cmdline(pid: i32) -> io::Result<String> {
     Ok(cmdline)
 }
 
-fn filter_procs(procs: &BTreeMap<i32, Process>, pattern: &str) -> BTreeMap<i32, Process> {
+fn match_cmdline(procs: &BTreeMap<i32, Process>, pattern: &str) -> BTreeSet<i32> {
+    let mut pids = BTreeSet::new();
     let re = Regex::new(pattern).expect("valid regular expression");
-    let mut filtered = BTreeMap::new();
     for (pid, proc) in procs.iter() {
         if re.is_match(&proc.cmdline) {
-            filtered.insert(*pid, proc.clone());
+            pids.insert(*pid);
         }
     }
-    filtered
+    pids
 }
 
-fn add_descendants(filtered: &mut BTreeMap<i32, Process>, all_procs: &BTreeMap<i32, Process>) {
-    let mut pid_stack = Vec::new();
-    'outer: for (pid, mut proc) in all_procs.iter() {
-        if filtered.contains_key(pid) {
+fn get_matched_and_descendants(procs: &BTreeMap<i32, Process>, matched_pids: &BTreeSet<i32>) -> BTreeMap<i32, Process> {
+    let mut marks = HashMap::new();
+    for pid in matched_pids.iter() {
+        marks.insert(*pid, true);
+    }
+
+    let mut descendants = Vec::new();
+    for (pid, mut proc) in procs.iter() {
+        if marks.get(pid).is_some() {
             continue;
         }
 
-        while proc.ppid != 0 {
-            if filtered.contains_key(&proc.ppid) {
-                filtered.insert(*pid, proc.clone());
-                for pid in pid_stack.drain(..) {
-                    if !filtered.contains_key(pid) {
-                        filtered.insert(*pid, all_procs.get(pid).unwrap().clone());
-                    }
+        loop {
+            let wanted = if proc.ppid == 0 {
+                Some(false)
+            } else if let Some(wanted) = marks.get(&proc.ppid) {
+                Some(*wanted)
+            } else {
+                None
+            };
+            if let Some(wanted) = wanted {
+                marks.insert(*pid, wanted);
+                for pid in descendants.drain(..) {
+                    marks.insert(pid, wanted);
                 }
-                continue 'outer;
-            }
-            if let Some(proc2) = all_procs.get(&proc.ppid) {
-                pid_stack.push(&proc.pid);
-                proc = proc2;
+                break;
+            } else {
+                descendants.push(*pid);
+                proc = procs.get(&proc.ppid).unwrap();
             }
         }
-        pid_stack.clear();
     }
+
+    let mut wanted_procs = BTreeMap::new();
+    for (pid, wanted) in marks.iter() {
+        if *wanted {
+            wanted_procs.insert(*pid, procs.get(pid).unwrap().clone());
+        }
+    }
+    wanted_procs
 }
