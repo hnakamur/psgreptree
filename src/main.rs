@@ -15,7 +15,6 @@ struct Process {
     pid: i32,
     ppid: i32,
     cmdline: String,
-    wanted: Option<bool>,
 }
 
 fn main() {
@@ -39,9 +38,10 @@ fn main() {
 
     smol::block_on(async {
         let pids = all_pids().await.unwrap();
-        let mut procs = all_procs(pids).await.unwrap();
-        let procs = filter_procs(procs, pattern.unwrap());
-        println!("procs={:?}", procs);
+        let procs = all_procs(pids).await.unwrap();
+        let mut filtered = filter_procs(&procs, pattern.unwrap());
+        add_descendants(&mut filtered, &procs);
+        println!("filtered={:?}", filtered);
 
         // fill_cmdline_for_matches(&mut procs, pattern.unwrap())
         //     .await
@@ -71,23 +71,11 @@ fn is_pid_entry(entry: &DirEntry) -> bool {
 }
 
 async fn all_procs(all_pids: Vec<i32>) -> io::Result<HashMap<i32, Process>> {
-    lazy_static! {
-        static ref PPID_RE: Regex = Regex::new(r"\) . (\d+)").unwrap();
-    }
-
     let mut pids = HashMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
         match future::zip(get_ppid(pid), get_cmdline(pid)).await {
-            (Ok(ppid), Ok(cmdline)) => pids.insert(
-                pid,
-                Process {
-                    pid,
-                    ppid,
-                    cmdline,
-                    wanted: None,
-                },
-            ),
+            (Ok(ppid), Ok(cmdline)) => pids.insert(pid, Process { pid, ppid, cmdline }),
             (Err(e), _) => return Err(e),
             (_, Err(e)) => return Err(e),
         };
@@ -116,13 +104,40 @@ async fn get_cmdline(pid: i32) -> io::Result<String> {
     Ok(cmdline)
 }
 
-fn filter_procs(mut procs: HashMap<i32, Process>, pattern: &str) -> HashMap<i32, Process> {
+fn filter_procs(procs: &HashMap<i32, Process>, pattern: &str) -> HashMap<i32, Process> {
     let re = Regex::new(pattern).expect("valid regular expression");
     let mut filtered = HashMap::new();
-    for (pid, proc) in procs.iter_mut() {
+    for (pid, proc) in procs.iter() {
         if re.is_match(&proc.cmdline) {
             filtered.insert(*pid, proc.clone());
         }
     }
     filtered
+}
+
+fn add_descendants(filtered: &mut HashMap<i32, Process>, all_procs: &HashMap<i32, Process>) {
+    let mut pid_stack = Vec::new();
+
+    'outer: for (pid, mut proc) in all_procs.iter() {
+        if filtered.contains_key(pid) {
+            continue;
+        }
+
+        while proc.ppid != 0 {
+            if filtered.contains_key(&proc.ppid) {
+                filtered.insert(*pid, proc.clone());
+                for pid in pid_stack.drain(..) {
+                    if !filtered.contains_key(pid) {
+                        filtered.insert(*pid, all_procs.get(pid).unwrap().clone());
+                    }
+                }
+                continue 'outer;
+            }
+            if let Some(proc2) = all_procs.get(&proc.ppid) {
+                pid_stack.push(&proc.pid);
+                proc = proc2;
+            }
+        }
+        pid_stack.clear();
+    }
 }
