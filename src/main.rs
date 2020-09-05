@@ -118,11 +118,16 @@ fn filter_procs(procs: &HashMap<i32, Process>, pattern: &str) -> HashMap<i32, Pr
 fn add_descendants(filtered: &mut HashMap<i32, Process>, all_procs: &HashMap<i32, Process>) {
     let mut pid_stack = Vec::new();
 
-    'outer: for (pid, mut proc) in all_procs.iter() {
+    let mut pids: Vec<i32> = all_procs.keys().map(|pid| *pid).collect();
+    pids.sort();
+    // println!("keys={:?}", pids);
+
+    'outer: for pid in pids.iter() {
         if filtered.contains_key(pid) {
             continue;
         }
 
+        let mut proc = all_procs.get(pid).unwrap();
         while proc.ppid != 0 {
             if filtered.contains_key(&proc.ppid) {
                 filtered.insert(*pid, proc.clone());
