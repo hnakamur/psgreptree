@@ -6,7 +6,7 @@ use clap::{App, Arg};
 use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::str;
 
@@ -42,12 +42,6 @@ fn main() {
         let mut filtered = filter_procs(&procs, pattern.unwrap());
         add_descendants(&mut filtered, &procs);
         println!("filtered={:?}", filtered);
-
-        // fill_cmdline_for_matches(&mut procs, pattern.unwrap())
-        //     .await
-        //     .unwrap();
-        // mark_wanted(&mut procs);
-        // println!("procs={:?}", procs);
     });
 }
 
@@ -70,8 +64,8 @@ fn is_pid_entry(entry: &DirEntry) -> bool {
     PID_RE.is_match(entry.file_name().to_str().unwrap())
 }
 
-async fn all_procs(all_pids: Vec<i32>) -> io::Result<HashMap<i32, Process>> {
-    let mut pids = HashMap::new();
+async fn all_procs(all_pids: Vec<i32>) -> io::Result<BTreeMap<i32, Process>> {
+    let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
         match future::zip(get_ppid(pid), get_cmdline(pid)).await {
@@ -104,9 +98,9 @@ async fn get_cmdline(pid: i32) -> io::Result<String> {
     Ok(cmdline)
 }
 
-fn filter_procs(procs: &HashMap<i32, Process>, pattern: &str) -> HashMap<i32, Process> {
+fn filter_procs(procs: &BTreeMap<i32, Process>, pattern: &str) -> BTreeMap<i32, Process> {
     let re = Regex::new(pattern).expect("valid regular expression");
-    let mut filtered = HashMap::new();
+    let mut filtered = BTreeMap::new();
     for (pid, proc) in procs.iter() {
         if re.is_match(&proc.cmdline) {
             filtered.insert(*pid, proc.clone());
@@ -115,19 +109,13 @@ fn filter_procs(procs: &HashMap<i32, Process>, pattern: &str) -> HashMap<i32, Pr
     filtered
 }
 
-fn add_descendants(filtered: &mut HashMap<i32, Process>, all_procs: &HashMap<i32, Process>) {
+fn add_descendants(filtered: &mut BTreeMap<i32, Process>, all_procs: &BTreeMap<i32, Process>) {
     let mut pid_stack = Vec::new();
-
-    let mut pids: Vec<i32> = all_procs.keys().map(|pid| *pid).collect();
-    pids.sort();
-    // println!("keys={:?}", pids);
-
-    'outer: for pid in pids.iter() {
+    'outer: for (pid, mut proc) in all_procs.iter() {
         if filtered.contains_key(pid) {
             continue;
         }
 
-        let mut proc = all_procs.get(pid).unwrap();
         while proc.ppid != 0 {
             if filtered.contains_key(&proc.ppid) {
                 filtered.insert(*pid, proc.clone());
