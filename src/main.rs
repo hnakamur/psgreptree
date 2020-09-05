@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 use async_fs::{read_dir, DirEntry};
 use clap::{App, Arg};
+use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
 use std::collections::HashMap;
@@ -13,8 +14,8 @@ use std::str;
 struct Process {
     pid: i32,
     ppid: i32,
+    cmdline: String,
     wanted: Option<bool>,
-    cmdline: Option<String>,
 }
 
 fn main() {
@@ -39,8 +40,11 @@ fn main() {
     smol::block_on(async {
         let pids = all_pids().await.unwrap();
         let mut procs = all_procs(pids).await.unwrap();
+        println!("procs={:?}", procs);
 
-        fill_cmdline_for_matches(&mut procs, pattern.unwrap()).await.unwrap();
+        // fill_cmdline_for_matches(&mut procs, pattern.unwrap())
+        //     .await
+        //     .unwrap();
         // mark_wanted(&mut procs);
         // println!("procs={:?}", procs);
     });
@@ -73,28 +77,55 @@ async fn all_procs(all_pids: Vec<i32>) -> io::Result<HashMap<i32, Process>> {
     let mut pids = HashMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
-        let path = format!("/proc/{}/stat", pid);
-        let data = async_fs::read(path).await?;
-        let text = str::from_utf8(&data).unwrap();
-        let caps = PPID_RE.captures(text).unwrap();
-        let ppid = caps.get(1).unwrap().as_str().parse::<i32>().unwrap();
-        let proc = Process{
-            pid, ppid, wanted: None, cmdline: None,
+        match future::zip(get_ppid(pid), get_cmdline(pid)).await {
+            (Ok(ppid), Ok(cmdline)) => pids.insert(
+                pid,
+                Process {
+                    pid,
+                    ppid,
+                    cmdline,
+                    wanted: None,
+                },
+            ),
+            (Err(e), _) => return Err(e),
+            (_, Err(e)) => return Err(e),
         };
-        pids.insert(pid, proc);
     }
     Ok(pids)
 }
 
-async fn fill_cmdline_for_matches(procs: &mut HashMap<i32, Process>, pattern: &str) -> io::Result<()> {
+async fn get_ppid(pid: i32) -> io::Result<i32> {
+    lazy_static! {
+        static ref PPID_RE: Regex = Regex::new(r"\) . (\d+)").unwrap();
+    }
+
+    let path = format!("/proc/{}/stat", pid);
+    let data = async_fs::read(path).await?;
+    let text = str::from_utf8(&data).unwrap();
+    let caps = PPID_RE.captures(text).unwrap();
+    let ppid = caps.get(1).unwrap().as_str().parse::<i32>().unwrap();
+    Ok(ppid)
+}
+
+async fn get_cmdline(pid: i32) -> io::Result<String> {
+    let path = format!("/proc/{}/cmdline", pid);
+    let data = async_fs::read(path).await?;
+    let raw_cmdline = String::from_utf8(data).unwrap();
+    let cmdline = raw_cmdline.trim_end_matches('\0').replace("\0", " ");
+    Ok(cmdline)
+}
+
+async fn fill_cmdline_for_matches(
+    procs: &mut HashMap<i32, Process>,
+    pattern: &str,
+) -> io::Result<()> {
     let re = Regex::new(pattern).expect("valid regular expression");
     let mut s = stream::iter(procs);
     while let Some((pid, mut proc)) = s.next().await {
         let path = format!("/proc/{}/cmdline", pid);
         let data = async_fs::read(path).await?;
         let raw_cmdline = String::from_utf8(data).unwrap();
-        let words: Vec<&str> = raw_cmdline.trim_end_matches('\0').split('\0').collect();
-        let cmdline = if words == vec![""] { String::from("") } else { shellwords::join(&words) };
+        let cmdline = raw_cmdline.trim_end_matches('\0').replace("\0", " ");
         println!("cmdline={:?}", cmdline);
         // let cmdline = cmdline.replace("\0", " ").trim_end().to_string();
         // if re.is_match(&cmdline) {
