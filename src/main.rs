@@ -6,7 +6,6 @@ use clap::{App, Arg};
 use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
-use std::convert::TryInto;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::process;
@@ -15,8 +14,8 @@ use std::str;
 
 #[derive(Debug, Clone)]
 struct Process {
-    pid: i32,
-    ppid: i32,
+    pid: u32,
+    ppid: u32,
     cmdline: String,
 }
 
@@ -48,13 +47,13 @@ fn main() {
     });
 }
 
-async fn all_pids() -> io::Result<Vec<i32>> {
+async fn all_pids() -> io::Result<Vec<u32>> {
     let mut pids = Vec::new();
     let mut entries = read_dir("/proc").await?;
     while let Some(res) = entries.next().await {
         let entry = res?;
         if is_pid_entry(&entry) {
-            pids.push(entry.file_name().to_str().unwrap().parse::<i32>().unwrap());
+            pids.push(entry.file_name().to_str().unwrap().parse::<u32>().unwrap());
         }
     }
     Ok(pids)
@@ -67,7 +66,7 @@ fn is_pid_entry(entry: &DirEntry) -> bool {
     PID_RE.is_match(entry.file_name().to_str().unwrap())
 }
 
-async fn all_procs(all_pids: Vec<i32>) -> io::Result<BTreeMap<i32, Process>> {
+async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
@@ -80,7 +79,7 @@ async fn all_procs(all_pids: Vec<i32>) -> io::Result<BTreeMap<i32, Process>> {
     Ok(pids)
 }
 
-async fn get_ppid(pid: i32) -> io::Result<i32> {
+async fn get_ppid(pid: u32) -> io::Result<u32> {
     lazy_static! {
         static ref PPID_RE: Regex = Regex::new(r"\) . (\d+)").unwrap();
     }
@@ -89,11 +88,11 @@ async fn get_ppid(pid: i32) -> io::Result<i32> {
     let data = async_fs::read(path).await?;
     let text = str::from_utf8(&data).unwrap();
     let caps = PPID_RE.captures(text).unwrap();
-    let ppid = caps.get(1).unwrap().as_str().parse::<i32>().unwrap();
+    let ppid = caps.get(1).unwrap().as_str().parse::<u32>().unwrap();
     Ok(ppid)
 }
 
-async fn get_cmdline(pid: i32) -> io::Result<String> {
+async fn get_cmdline(pid: u32) -> io::Result<String> {
     let path = format!("/proc/{}/cmdline", pid);
     let data = async_fs::read(path).await?;
     let raw_cmdline = String::from_utf8(data).unwrap();
@@ -101,10 +100,10 @@ async fn get_cmdline(pid: i32) -> io::Result<String> {
     Ok(cmdline)
 }
 
-fn match_cmdline(procs: &BTreeMap<i32, Process>, pattern: &str) -> BTreeSet<i32> {
+fn match_cmdline(procs: &BTreeMap<u32, Process>, pattern: &str) -> BTreeSet<u32> {
     let mut pids = BTreeSet::new();
     let re = Regex::new(pattern).expect("valid regular expression");
-    let my_pid = process::id().try_into().unwrap();
+    let my_pid = process::id();
     for (pid, proc) in procs.iter() {
         if re.is_match(&proc.cmdline) && *pid != my_pid {
             pids.insert(*pid);
@@ -113,7 +112,7 @@ fn match_cmdline(procs: &BTreeMap<i32, Process>, pattern: &str) -> BTreeSet<i32>
     pids
 }
 
-fn get_matched_and_descendants(procs: &BTreeMap<i32, Process>, matched_pids: &BTreeSet<i32>) -> BTreeMap<i32, Process> {
+fn get_matched_and_descendants(procs: &BTreeMap<u32, Process>, matched_pids: &BTreeSet<u32>) -> BTreeMap<u32, Process> {
     let mut marks = HashMap::new();
     for pid in matched_pids.iter() {
         marks.insert(*pid, true);
