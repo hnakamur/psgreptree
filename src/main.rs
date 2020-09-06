@@ -1,3 +1,6 @@
+#![feature(map_first_last)]
+use std::collections::BTreeMap;
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -6,7 +9,8 @@ use clap::{App, Arg};
 use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::io;
 use std::process;
 use std::str;
@@ -28,6 +32,32 @@ struct ProcessForestNode {
 struct ProcessForest {
     roots: BTreeSet<u32>,
     nodes: BTreeMap<u32, ProcessForestNode>,
+}
+
+impl ProcessForest {
+    fn pid_column_width(&self) -> usize {
+        if let Some((pid, _)) = self.nodes.last_key_value() {
+            column_width_for_u32(*pid)
+        } else {
+            0
+        }
+    }
+}
+
+impl fmt::Display for ProcessForest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pid_width = self.pid_column_width();
+        for node in self.nodes.values() {
+            writeln!(
+                f,
+                "{:>prec$} {}",
+                node.process.pid,
+                node.process.cmdline,
+                prec = pid_width
+            )?;
+        }
+        Ok(())
+    }
 }
 
 fn main() {
@@ -56,7 +86,7 @@ fn main() {
         let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
         // println!("wanted_procs={:?}", wanted_procs);
         let proc_forest = build_process_forest(wanted_procs);
-        println!("proc_forest={:?}", proc_forest);
+        println!("proc_forest=\n{}", proc_forest);
     });
 }
 
@@ -195,4 +225,28 @@ fn build_process_forest(procs: BTreeMap<u32, Process>) -> ProcessForest {
         }
     }
     ProcessForest { roots, nodes }
+}
+
+fn column_width_for_u32(n: u32) -> usize {
+    let mut width = 1;
+    let mut n = n / 10;
+    while n > 0 {
+        width += 1;
+        n /= 10;
+    }
+    width
+}
+
+mod test {
+    use super::column_width_for_u32;
+
+    #[test]
+    fn test_column_width_for_u32() {
+        assert_eq!(column_width_for_u32(0), 1);
+        assert_eq!(column_width_for_u32(1), 1);
+        assert_eq!(column_width_for_u32(9), 1);
+        assert_eq!(column_width_for_u32(10), 2);
+        assert_eq!(column_width_for_u32(99), 2);
+        assert_eq!(column_width_for_u32(100), 3);
+    }
 }
