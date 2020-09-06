@@ -6,9 +6,12 @@ use clap::{App, Arg};
 use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
+use std::convert::TryInto;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
+use std::process;
 use std::str;
+
 
 #[derive(Debug, Clone)]
 struct Process {
@@ -101,8 +104,9 @@ async fn get_cmdline(pid: i32) -> io::Result<String> {
 fn match_cmdline(procs: &BTreeMap<i32, Process>, pattern: &str) -> BTreeSet<i32> {
     let mut pids = BTreeSet::new();
     let re = Regex::new(pattern).expect("valid regular expression");
+    let my_pid = process::id().try_into().unwrap();
     for (pid, proc) in procs.iter() {
-        if re.is_match(&proc.cmdline) {
+        if re.is_match(&proc.cmdline) && *pid != my_pid {
             pids.insert(*pid);
         }
     }
