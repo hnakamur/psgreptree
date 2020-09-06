@@ -11,12 +11,23 @@ use std::io;
 use std::process;
 use std::str;
 
-
 #[derive(Debug, Clone)]
 struct Process {
     pid: u32,
     ppid: u32,
     cmdline: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessForestNode {
+    process: Process,
+    child_pids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessForest {
+    roots: BTreeSet<u32>,
+    nodes: BTreeMap<u32, ProcessForestNode>,
 }
 
 fn main() {
@@ -43,7 +54,9 @@ fn main() {
         let procs = all_procs(pids).await.unwrap();
         let matched_pids = match_cmdline(&procs, pattern.unwrap());
         let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
-        println!("wanted_procs={:?}", wanted_procs);
+        // println!("wanted_procs={:?}", wanted_procs);
+        let proc_forest = build_process_forest(wanted_procs);
+        println!("proc_forest={:?}", proc_forest);
     });
 }
 
@@ -112,7 +125,10 @@ fn match_cmdline(procs: &BTreeMap<u32, Process>, pattern: &str) -> BTreeSet<u32>
     pids
 }
 
-fn get_matched_and_descendants(procs: &BTreeMap<u32, Process>, matched_pids: &BTreeSet<u32>) -> BTreeMap<u32, Process> {
+fn get_matched_and_descendants(
+    procs: &BTreeMap<u32, Process>,
+    matched_pids: &BTreeSet<u32>,
+) -> BTreeMap<u32, Process> {
     let mut marks = HashMap::new();
     for pid in matched_pids.iter() {
         marks.insert(*pid, true);
@@ -152,4 +168,31 @@ fn get_matched_and_descendants(procs: &BTreeMap<u32, Process>, matched_pids: &BT
         }
     }
     wanted_procs
+}
+
+fn build_process_forest(procs: BTreeMap<u32, Process>) -> ProcessForest {
+    let mut roots = BTreeSet::new();
+    let mut nodes = BTreeMap::new();
+    for (pid, proc) in procs.iter() {
+        if procs.contains_key(&proc.ppid) {
+            let parent_node = nodes.entry(proc.ppid).or_insert(ProcessForestNode {
+                process: procs.get(&proc.ppid).unwrap().clone(),
+                child_pids: Vec::new(),
+            });
+            parent_node.child_pids.push(*pid);
+        } else {
+            roots.insert(*pid);
+        }
+
+        if !nodes.contains_key(pid) {
+            nodes.insert(
+                *pid,
+                ProcessForestNode {
+                    process: proc.clone(),
+                    child_pids: Vec::new(),
+                },
+            );
+        }
+    }
+    ProcessForest { roots, nodes }
 }
