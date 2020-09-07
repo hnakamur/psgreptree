@@ -9,6 +9,7 @@ use clap::{App, Arg};
 use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
 use regex::Regex;
+use std::cmp;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::io;
@@ -58,6 +59,11 @@ impl fmt::Display for ProcessForest {
         }
         Ok(())
     }
+}
+
+struct OutputLineRecord {
+    pid: String,
+    cmdline: String,
 }
 
 fn main() {
@@ -237,15 +243,18 @@ fn column_width_for_u32(n: u32) -> usize {
     width
 }
 
-fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>, lines: &mut Vec<String>) {
+fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>, records: &mut Vec<OutputLineRecord>) {
     let node = f.nodes.get(&pid).unwrap();
-    lines.push(format!("{:>2} {}{}", pid, last_child_to_indent(&last_child), node.process.cmdline));
+    records.push(OutputLineRecord{
+        pid: format!("{}", pid),
+        cmdline: format!("{}{}", last_child_to_indent(&last_child), node.process.cmdline),
+    });
     let mut i = 0;
     while i < node.child_pids.len() {
         let child_pid = node.child_pids[i];
         let mut last_child2 = last_child.clone();
         last_child2.push(i == node.child_pids.len() - 1);
-        print_forest_helper(f, child_pid, last_child2, lines);
+        print_forest_helper(f, child_pid, last_child2, records);
         i += 1;
     }
 }
@@ -264,6 +273,17 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
         i += 1;
     }
     indent
+}
+
+fn get_max_pid_column_width(records: &Vec<OutputLineRecord>) -> usize {
+    records.iter().fold(0, |acc, x| cmp::max(acc, x.pid.len()))
+}
+
+fn pad_columns(records: &mut Vec<OutputLineRecord>) {
+    let width = get_max_pid_column_width(&records);
+    for record in records {
+        record.pid = format!("{:>prec$}", record.pid, prec = width);
+    }
 }
 
 mod test {
@@ -387,12 +407,13 @@ mod test {
         nodes.insert(n10.process.pid, n10);
 
         let forest = ProcessForest { roots, nodes };
-        let mut lines:Vec<String> = Vec::new();
+        let mut records = Vec::new();
         for pid in forest.roots.iter() {
-            print_forest_helper(&forest, *pid, vec![], &mut lines);
+            print_forest_helper(&forest, *pid, vec![], &mut records);
         }
-        for line in lines {
-            println!("{}", line);
+        pad_columns(&mut records);
+        for record in records {
+            println!("{} {}", record.pid, record.cmdline);
         }
     }
 }
