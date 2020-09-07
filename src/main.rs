@@ -237,14 +237,33 @@ fn column_width_for_u32(n: u32) -> usize {
     width
 }
 
-fn print_forest_helper(f: &ProcessForest, pid: &u32, indent: Vec<&str>) {
+fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>) {
     let node = f.nodes.get(&pid).unwrap();
-    println!("{:>2} {}{}", pid, indent.join(""), node.process.cmdline);
-    let mut indent2 = indent.clone();
-    indent2.push(" \\_ ");
-    for child_pid in node.child_pids.iter() {
-        print_forest_helper(f, child_pid, indent2.clone());
+    println!("{:>2} {}{}", pid, last_child_to_indent(&last_child), node.process.cmdline);
+    let mut i = 0;
+    while i < node.child_pids.len() {
+        let child_pid = node.child_pids[i];
+        let mut last_child2 = last_child.clone();
+        last_child2.push(i == node.child_pids.len() - 1);
+        print_forest_helper(f, child_pid, last_child2);
+        i += 1;
     }
+}
+
+fn last_child_to_indent(last_child: &[bool]) -> String {
+    let mut indent = String::new();
+    let mut i = 0;
+    while i < last_child.len() {
+        indent.push_str(if i == last_child.len() - 1 {
+            " \\_ "
+        } else if last_child[i] {
+            "    "
+        } else {
+            " |  "
+        });
+        i += 1;
+    }
+    indent
 }
 
 mod test {
@@ -369,7 +388,7 @@ mod test {
 
         let forest = ProcessForest { roots, nodes };
         for pid in forest.roots.iter() {
-            print_forest_helper(&forest, pid, vec![]);
+            print_forest_helper(&forest, *pid, vec![]);
         }
     }
 }
