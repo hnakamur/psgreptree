@@ -237,15 +237,15 @@ fn column_width_for_u32(n: u32) -> usize {
     width
 }
 
-fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>) {
+fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>, lines: &mut Vec<String>) {
     let node = f.nodes.get(&pid).unwrap();
-    println!("{:>2} {}{}", pid, last_child_to_indent(&last_child), node.process.cmdline);
+    lines.push(format!("{:>2} {}{}", pid, last_child_to_indent(&last_child), node.process.cmdline));
     let mut i = 0;
     while i < node.child_pids.len() {
         let child_pid = node.child_pids[i];
         let mut last_child2 = last_child.clone();
         last_child2.push(i == node.child_pids.len() - 1);
-        print_forest_helper(f, child_pid, last_child2);
+        print_forest_helper(f, child_pid, last_child2, lines);
         i += 1;
     }
 }
@@ -387,8 +387,12 @@ mod test {
         nodes.insert(n10.process.pid, n10);
 
         let forest = ProcessForest { roots, nodes };
+        let mut lines:Vec<String> = Vec::new();
         for pid in forest.roots.iter() {
-            print_forest_helper(&forest, *pid, vec![]);
+            print_forest_helper(&forest, *pid, vec![], &mut lines);
+        }
+        for line in lines {
+            println!("{}", line);
         }
     }
 }
