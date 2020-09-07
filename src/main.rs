@@ -20,7 +20,15 @@ use std::str;
 struct Process {
     pid: u32,
     ppid: u32,
+    state: String,
     cmdline: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProcStat {
+    comm: String,
+    state: String,
+    ppid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +61,7 @@ impl fmt::Display for ProcessForest {
         }
         pad_columns(&mut records);
         for record in records {
-            writeln!(f, "{} {}", record.pid, record.cmdline)?;
+            writeln!(f, "{} {} {}", record.pid, record.stat, record.cmdline)?;
         }
         Ok(())
     }
@@ -61,6 +69,7 @@ impl fmt::Display for ProcessForest {
 
 struct OutputLineRecord {
     pid: String,
+    stat: String,
     cmdline: String,
 }
 
@@ -117,8 +126,19 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
-        match future::zip(get_ppid(pid), get_cmdline(pid)).await {
-            (Ok(ppid), Ok(cmdline)) => pids.insert(pid, Process { pid, ppid, cmdline }),
+        match future::zip(get_stat(pid), get_cmdline(pid)).await {
+            (Ok(stat), Ok(mut cmdline)) => {
+                if stat.state == "Z" {
+                    cmdline = format!("[{}] <defunct>", &stat.comm);
+                }
+                let proc = Process{
+                    pid,
+                    ppid: stat.ppid,
+                    state: stat.state,
+                    cmdline,
+                };
+                pids.insert(pid, proc);
+            },
             (Err(e), _) => return Err(e),
             (_, Err(e)) => return Err(e),
         };
@@ -126,17 +146,19 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     Ok(pids)
 }
 
-async fn get_ppid(pid: u32) -> io::Result<u32> {
+async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     lazy_static! {
-        static ref PPID_RE: Regex = Regex::new(r"\) . (\d+)").unwrap();
+        static ref STAT_RE: Regex = Regex::new(r"\((.+?)\) (.) (\d+)").unwrap();
     }
 
     let path = format!("/proc/{}/stat", pid);
     let data = async_fs::read(path).await?;
     let text = str::from_utf8(&data).unwrap();
-    let caps = PPID_RE.captures(text).unwrap();
-    let ppid = caps.get(1).unwrap().as_str().parse::<u32>().unwrap();
-    Ok(ppid)
+    let caps = STAT_RE.captures(text).unwrap();
+    let comm = caps.get(1).unwrap().as_str().to_string();
+    let state = caps.get(2).unwrap().as_str().to_string();
+    let ppid = caps.get(3).unwrap().as_str().parse::<u32>().unwrap();
+    Ok(ProcStat{ comm, state, ppid })
 }
 
 async fn get_cmdline(pid: u32) -> io::Result<String> {
@@ -245,6 +267,7 @@ fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>, recor
     let node = f.nodes.get(&pid).unwrap();
     records.push(OutputLineRecord{
         pid: format!("{}", pid),
+        stat: node.process.state.clone(),
         cmdline: format!("{}{}", last_child_to_indent(&last_child), node.process.cmdline),
     });
     let mut i = 0;
