@@ -237,8 +237,19 @@ fn column_width_for_u32(n: u32) -> usize {
     width
 }
 
+fn print_forest_helper(f: &ProcessForest, pid: &u32, indent: Vec<&str>) {
+    let node = f.nodes.get(&pid).unwrap();
+    println!("{:>2} {}{}", pid, indent.join(""), node.process.cmdline);
+    let mut indent2 = indent.clone();
+    indent2.push(" \\_ ");
+    for child_pid in node.child_pids.iter() {
+        print_forest_helper(f, child_pid, indent2.clone());
+    }
+}
+
 mod test {
-    use super::column_width_for_u32;
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn test_column_width_for_u32() {
@@ -248,5 +259,117 @@ mod test {
         assert_eq!(column_width_for_u32(10), 2);
         assert_eq!(column_width_for_u32(99), 2);
         assert_eq!(column_width_for_u32(100), 3);
+    }
+
+    #[test]
+    fn test_process_forest_fmt() {
+        let mut roots = BTreeSet::new();
+        roots.insert(1u32);
+
+        let mut nodes = BTreeMap::new();
+        let n1 = ProcessForestNode {
+            process: Process {
+                pid: 1,
+                ppid: 0,
+                cmdline: String::from("init"),
+            },
+            child_pids: vec![2, 5],
+        };
+        nodes.insert(n1.process.pid, n1);
+
+        let n2 = ProcessForestNode {
+            process: Process {
+                pid: 2,
+                ppid: 1,
+                cmdline: String::from("foo"),
+            },
+            child_pids: vec![3, 4],
+        };
+        nodes.insert(n2.process.pid, n2);
+
+        let n3 = ProcessForestNode {
+            process: Process {
+                pid: 3,
+                ppid: 2,
+                cmdline: String::from("bar"),
+            },
+            child_pids: vec![6, 7],
+        };
+        nodes.insert(n3.process.pid, n3);
+
+        let n4 = ProcessForestNode {
+            process: Process {
+                pid: 4,
+                ppid: 2,
+                cmdline: String::from("baz"),
+            },
+            child_pids: vec![10],
+        };
+        nodes.insert(n4.process.pid, n4);
+
+        let n5 = ProcessForestNode {
+            process: Process {
+                pid: 5,
+                ppid: 1,
+                cmdline: String::from("hoge"),
+            },
+            child_pids: vec![8],
+        };
+        nodes.insert(n5.process.pid, n5);
+
+        let n6 = ProcessForestNode {
+            process: Process {
+                pid: 6,
+                ppid: 3,
+                cmdline: String::from("huga"),
+            },
+            child_pids: vec![],
+        };
+        nodes.insert(n6.process.pid, n6);
+
+        let n7 = ProcessForestNode {
+            process: Process {
+                pid: 7,
+                ppid: 3,
+                cmdline: String::from("yay"),
+            },
+            child_pids: vec![],
+        };
+        nodes.insert(n7.process.pid, n7);
+
+        let n8 = ProcessForestNode {
+            process: Process {
+                pid: 8,
+                ppid: 5,
+                cmdline: String::from("ls"),
+            },
+            child_pids: vec![9],
+        };
+        nodes.insert(n8.process.pid, n8);
+
+        let n9 = ProcessForestNode {
+            process: Process {
+                pid: 9,
+                ppid: 8,
+                cmdline: String::from("cat"),
+            },
+            child_pids: vec![],
+        };
+        nodes.insert(n9.process.pid, n9);
+
+        let n10 = ProcessForestNode {
+            process: Process {
+                pid: 10,
+                ppid: 4,
+                cmdline: String::from("top"),
+            },
+            child_pids: vec![],
+        };
+        nodes.insert(n10.process.pid, n10);
+
+        let forest = ProcessForest { roots, nodes };
+        for pid in forest.roots.iter() {
+            print_forest_helper(&forest, pid, vec![]);
+        }
     }
 }
