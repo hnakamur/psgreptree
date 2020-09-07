@@ -131,14 +131,14 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
                 if stat.state == "Z" {
                     cmdline = format!("[{}] <defunct>", &stat.comm);
                 }
-                let proc = Process{
+                let proc = Process {
                     pid,
                     ppid: stat.ppid,
                     state: stat.state,
                     cmdline,
                 };
                 pids.insert(pid, proc);
-            },
+            }
             (Err(e), _) => return Err(e),
             (_, Err(e)) => return Err(e),
         };
@@ -147,18 +147,15 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
 }
 
 async fn get_stat(pid: u32) -> io::Result<ProcStat> {
-    lazy_static! {
-        static ref STAT_RE: Regex = Regex::new(r"\((.+?)\) (.) (\d+)").unwrap();
-    }
-
     let path = format!("/proc/{}/stat", pid);
     let data = async_fs::read(path).await?;
     let text = str::from_utf8(&data).unwrap();
-    let caps = STAT_RE.captures(text).unwrap();
-    let comm = caps.get(1).unwrap().as_str().to_string();
-    let state = caps.get(2).unwrap().as_str().to_string();
-    let ppid = caps.get(3).unwrap().as_str().parse::<u32>().unwrap();
-    Ok(ProcStat{ comm, state, ppid })
+    let fields: Vec<&str> = text.split_ascii_whitespace().collect();
+    println!("pid={}, fields1={}", pid, fields[1]);
+    let comm = fields[1].strip_prefix("(").unwrap().strip_suffix(")").unwrap().to_string();
+    let state = fields[2].to_string();
+    let ppid = fields[3].parse::<u32>().unwrap();
+    Ok(ProcStat { comm, state, ppid })
 }
 
 async fn get_cmdline(pid: u32) -> io::Result<String> {
@@ -263,12 +260,21 @@ fn column_width_for_u32(n: u32) -> usize {
     width
 }
 
-fn print_forest_helper(f: &ProcessForest, pid: u32, last_child: Vec<bool>, records: &mut Vec<OutputLineRecord>) {
+fn print_forest_helper(
+    f: &ProcessForest,
+    pid: u32,
+    last_child: Vec<bool>,
+    records: &mut Vec<OutputLineRecord>,
+) {
     let node = f.nodes.get(&pid).unwrap();
-    records.push(OutputLineRecord{
+    records.push(OutputLineRecord {
         pid: format!("{}", pid),
         stat: node.process.state.clone(),
-        cmdline: format!("{}{}", last_child_to_indent(&last_child), node.process.cmdline),
+        cmdline: format!(
+            "{}{}",
+            last_child_to_indent(&last_child),
+            node.process.cmdline
+        ),
     });
     let mut i = 0;
     while i < node.child_pids.len() {
@@ -331,6 +337,7 @@ mod test {
             process: Process {
                 pid: 1,
                 ppid: 0,
+                state: String::from("S"),
                 cmdline: String::from("init"),
             },
             child_pids: vec![2, 5],
@@ -341,6 +348,7 @@ mod test {
             process: Process {
                 pid: 2,
                 ppid: 1,
+                state: String::from("S"),
                 cmdline: String::from("foo"),
             },
             child_pids: vec![3, 4],
@@ -351,6 +359,7 @@ mod test {
             process: Process {
                 pid: 3,
                 ppid: 2,
+                state: String::from("S"),
                 cmdline: String::from("bar"),
             },
             child_pids: vec![6, 7],
@@ -361,6 +370,7 @@ mod test {
             process: Process {
                 pid: 4,
                 ppid: 2,
+                state: String::from("S"),
                 cmdline: String::from("baz"),
             },
             child_pids: vec![10],
@@ -371,6 +381,7 @@ mod test {
             process: Process {
                 pid: 5,
                 ppid: 1,
+                state: String::from("S"),
                 cmdline: String::from("hoge"),
             },
             child_pids: vec![8],
@@ -381,6 +392,7 @@ mod test {
             process: Process {
                 pid: 6,
                 ppid: 3,
+                state: String::from("S"),
                 cmdline: String::from("huga"),
             },
             child_pids: vec![],
@@ -391,6 +403,7 @@ mod test {
             process: Process {
                 pid: 7,
                 ppid: 3,
+                state: String::from("S"),
                 cmdline: String::from("yay"),
             },
             child_pids: vec![],
@@ -401,6 +414,7 @@ mod test {
             process: Process {
                 pid: 8,
                 ppid: 5,
+                state: String::from("S"),
                 cmdline: String::from("ls"),
             },
             child_pids: vec![9],
@@ -411,6 +425,7 @@ mod test {
             process: Process {
                 pid: 9,
                 ppid: 8,
+                state: String::from("S"),
                 cmdline: String::from("cat"),
             },
             child_pids: vec![],
@@ -421,6 +436,7 @@ mod test {
             process: Process {
                 pid: 10,
                 ppid: 4,
+                state: String::from("S"),
                 cmdline: String::from("top"),
             },
             child_pids: vec![],
