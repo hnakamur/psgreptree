@@ -29,6 +29,8 @@ struct ProcStat {
     comm: String,
     state: String,
     ppid: u32,
+    utime: u32,
+    stime: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -147,15 +149,21 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
 }
 
 async fn get_stat(pid: u32) -> io::Result<ProcStat> {
+    lazy_static! {
+        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+)").unwrap();
+    }
+
     let path = format!("/proc/{}/stat", pid);
     let data = async_fs::read(path).await?;
     let text = str::from_utf8(&data).unwrap();
-    let fields: Vec<&str> = text.split_ascii_whitespace().collect();
-    println!("pid={}, fields1={}", pid, fields[1]);
-    let comm = fields[1].strip_prefix("(").unwrap().strip_suffix(")").unwrap().to_string();
-    let state = fields[2].to_string();
-    let ppid = fields[3].parse::<u32>().unwrap();
-    Ok(ProcStat { comm, state, ppid })
+    let cap = STAT_RE.captures(text).unwrap();
+    let comm = cap.name("comm").unwrap().as_str().to_string();
+    let state = cap.name("state").unwrap().as_str().to_string();
+    let ppid = cap.name("ppid").unwrap().as_str().parse::<u32>().unwrap();
+    let utime = cap.name("utime").unwrap().as_str().parse::<u32>().unwrap();
+    let stime = cap.name("stime").unwrap().as_str().parse::<u32>().unwrap();
+    // println!("pid={}, comm={}, state={}, ppid={}, utime={}, stime={}", pid, comm, state, ppid, utime, stime);
+    Ok(ProcStat { comm, state, ppid, utime, stime })
 }
 
 async fn get_cmdline(pid: u32) -> io::Result<String> {
@@ -302,7 +310,7 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
     indent
 }
 
-fn get_max_pid_column_width(records: &Vec<OutputLineRecord>) -> usize {
+fn get_max_pid_column_width(records: &[OutputLineRecord]) -> usize {
     records.iter().fold(0, |acc, x| cmp::max(acc, x.pid.len()))
 }
 
