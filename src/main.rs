@@ -47,15 +47,13 @@ impl ProcessForest {
 
 impl fmt::Display for ProcessForest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let pid_width = self.pid_column_width();
-        for node in self.nodes.values() {
-            writeln!(
-                f,
-                "{:>prec$} {}",
-                node.process.pid,
-                node.process.cmdline,
-                prec = pid_width
-            )?;
+        let mut records = Vec::new();
+        for pid in self.roots.iter() {
+            print_forest_helper(&self, *pid, vec![], &mut records);
+        }
+        pad_columns(&mut records);
+        for record in records {
+            writeln!(f, "{} {}", record.pid, record.cmdline)?;
         }
         Ok(())
     }
