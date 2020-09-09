@@ -11,6 +11,7 @@ use futures_lite::*;
 use regex::Regex;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
+use std::convert::TryInto;
 use std::fmt;
 use std::io;
 use std::process;
@@ -19,12 +20,42 @@ use std::str;
 #[derive(Debug, Clone)]
 struct Process {
     pid: u32,
-    ppid: u32,
     state: String,
-    cmdline: String,
+    ppid: u32,
+    pgrp: u32,
+    session: u32,
+    tpgid: i32,
     utime: u32,
     stime: u32,
+    nice: i32,
+    num_threads: i32,
     vm_lock: u32,
+    cmdline: String,
+}
+
+impl Process {
+    fn format_stat(&self) -> String {
+        let mut stat = self.state.clone();
+        if self.nice < 0 {
+            stat.push('<');
+        }
+        if self.nice > 0 {
+            stat.push('N');
+        }
+        if self.vm_lock != 0 {
+            stat.push('L');
+        }
+        if self.session == self.pid {
+            stat.push('s'); // session leader
+        }
+        if self.num_threads > 1 {
+            stat.push('l'); // multi-threaded
+        }
+        if self.tpgid == self.pgrp.try_into().unwrap() {
+            stat.push('+'); // in foreground process group
+        }
+        stat
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -32,8 +63,13 @@ struct ProcStat {
     comm: String,
     state: String,
     ppid: u32,
+    pgrp: u32,
+    session: u32,
+    tpgid: i32,
     utime: u32,
     stime: u32,
+    nice: i32,
+    num_threads: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -140,8 +176,13 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
                     pid,
                     ppid: stat.ppid,
                     state: stat.state,
+                    pgrp: stat.pgrp,
+                    session: stat.session,
+                    tpgid: stat.tpgid,
                     utime: stat.utime,
                     stime: stat.stime,
+                    nice: stat.nice,
+                    num_threads: stat.num_threads,
                     cmdline,
                     vm_lock,
                 };
@@ -157,7 +198,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
 async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     lazy_static! {
         // https://elixir.bootlin.com/linux/latest/C/ident/do_task_stat
-        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
+        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<cutime>-?\d+) (?P<cstime>-?\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
     }
 
     let path = format!("/proc/{}/stat", pid);
@@ -167,15 +208,34 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     let comm = cap.name("comm").unwrap().as_str().to_string();
     let state = cap.name("state").unwrap().as_str().to_string();
     let ppid = cap.name("ppid").unwrap().as_str().parse::<u32>().unwrap();
+    let pgrp = cap.name("pgrp").unwrap().as_str().parse::<u32>().unwrap();
+    let session = cap
+        .name("session")
+        .unwrap()
+        .as_str()
+        .parse::<u32>()
+        .unwrap();
+    let tpgid = cap.name("tpgid").unwrap().as_str().parse::<i32>().unwrap();
     let utime = cap.name("utime").unwrap().as_str().parse::<u32>().unwrap();
     let stime = cap.name("stime").unwrap().as_str().parse::<u32>().unwrap();
-    // println!("pid={}, comm={}, state={}, ppid={}, utime={}, stime={}", pid, comm, state, ppid, utime, stime);
+    let nice = cap.name("nice").unwrap().as_str().parse::<i32>().unwrap();
+    let num_threads = cap
+        .name("num_threads")
+        .unwrap()
+        .as_str()
+        .parse::<i32>()
+        .unwrap();
     Ok(ProcStat {
         comm,
         state,
         ppid,
+        pgrp,
+        session,
+        tpgid,
         utime,
         stime,
+        nice,
+        num_threads,
     })
 }
 
@@ -317,7 +377,7 @@ fn print_forest_helper(
     let node = f.nodes.get(&pid).unwrap();
     records.push(OutputLineRecord {
         pid: format!("{}", pid),
-        stat: node.process.state.clone(),
+        stat: format!("{:4}", node.process.format_stat()),
         cmdline: format!(
             "{}{}",
             last_child_to_indent(&last_child),
@@ -388,8 +448,13 @@ mod test {
                 ppid: 0,
                 state: String::from("S"),
                 cmdline: String::from("init"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![2, 5],
@@ -402,8 +467,13 @@ mod test {
                 ppid: 1,
                 state: String::from("S"),
                 cmdline: String::from("foo"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![3, 4],
@@ -416,8 +486,13 @@ mod test {
                 ppid: 2,
                 state: String::from("S"),
                 cmdline: String::from("bar"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![6, 7],
@@ -430,8 +505,13 @@ mod test {
                 ppid: 2,
                 state: String::from("S"),
                 cmdline: String::from("baz"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![10],
@@ -444,8 +524,13 @@ mod test {
                 ppid: 1,
                 state: String::from("S"),
                 cmdline: String::from("hoge"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![8],
@@ -458,8 +543,13 @@ mod test {
                 ppid: 3,
                 state: String::from("S"),
                 cmdline: String::from("huga"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
@@ -472,8 +562,13 @@ mod test {
                 ppid: 3,
                 state: String::from("S"),
                 cmdline: String::from("yay"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
@@ -486,8 +581,13 @@ mod test {
                 ppid: 5,
                 state: String::from("S"),
                 cmdline: String::from("ls"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![9],
@@ -500,8 +600,13 @@ mod test {
                 ppid: 8,
                 state: String::from("S"),
                 cmdline: String::from("cat"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
@@ -514,8 +619,13 @@ mod test {
                 ppid: 4,
                 state: String::from("S"),
                 cmdline: String::from("top"),
+                pgrp: 0,
+                session: 0,
+                tpgid: 0,
                 utime: 0,
                 stime: 0,
+                nice: 0,
+                num_threads: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
