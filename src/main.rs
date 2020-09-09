@@ -150,6 +150,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
 
 async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     lazy_static! {
+        // https://elixir.bootlin.com/linux/latest/C/ident/do_task_stat
         static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>\d+) (?P<nice>\d+) (?P<num_threads>\d+) (?P<itrealvalue>\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
     }
 
@@ -163,7 +164,13 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     let utime = cap.name("utime").unwrap().as_str().parse::<u32>().unwrap();
     let stime = cap.name("stime").unwrap().as_str().parse::<u32>().unwrap();
     // println!("pid={}, comm={}, state={}, ppid={}, utime={}, stime={}", pid, comm, state, ppid, utime, stime);
-    Ok(ProcStat { comm, state, ppid, utime, stime })
+    Ok(ProcStat {
+        comm,
+        state,
+        ppid,
+        utime,
+        stime,
+    })
 }
 
 async fn get_cmdline(pid: u32) -> io::Result<String> {
@@ -323,6 +330,7 @@ fn pad_columns(records: &mut Vec<OutputLineRecord>) {
 
 mod test {
     use super::*;
+    use smol::io::{self, AsyncBufReadExt};
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
@@ -460,5 +468,88 @@ mod test {
         for record in records {
             println!("{} {}", record.pid, record.cmdline);
         }
+    }
+
+    #[test]
+    fn test_read_proc_status() {
+        // https://elixir.bootlin.com/linux/latest/C/ident/proc_pid_status
+        // https://elixir.bootlin.com/linux/latest/C/ident/proc_task_name
+        let input = b"Name:	Web Content\n\
+            Umask:	0002\n\
+            State:	S (sleeping)\n\
+            Tgid:	208455\n\
+            Ngid:	0\n\
+            Pid:	208455\n\
+            PPid:	208351\n\
+            TracerPid:	0\n\
+            Uid:	1000	1000	1000	1000\n\
+            Gid:	1000	1000	1000	1000\n\
+            FDSize:	128\n\
+            Groups:	4 24 27 30 46 120 131 132 998 1000 \n\
+            NStgid:	208455\n\
+            NSpid:	208455\n\
+            NSpgid:	1955\n\
+            NSsid:	1955\n\
+            VmPeak:	 3872392 kB\n\
+            VmSize:	 3757184 kB\n\
+            VmLck:	       0 kB\n\
+            VmPin:	       0 kB\n\
+            VmHWM:	  987072 kB\n\
+            VmRSS:	  606220 kB\n\
+            RssAnon:	  262300 kB\n\
+            RssFile:	  282628 kB\n\
+            RssShmem:	   61292 kB\n\
+            VmData:	  848068 kB\n\
+            VmStk:	     332 kB\n\
+            VmExe:	     584 kB\n\
+            VmLib:	  230568 kB\n\
+            VmPTE:	    4176 kB\n\
+            VmSwap:	       0 kB\n\
+            HugetlbPages:	       0 kB\n\
+            CoreDumping:	0\n\
+            THP_enabled:	1\n\
+            Threads:	53\n\
+            SigQ:	0/62534\n\
+            SigPnd:	0000000000000000\n\
+            ShdPnd:	0000000000000000\n\
+            SigBlk:	0000000000000000\n\
+            SigIgn:	0000000000011002\n\
+            SigCgt:	0000000fc08004f8\n\
+            CapInh:	0000000000000000\n\
+            CapPrm:	0000000000000000\n\
+            CapEff:	0000000000000000\n\
+            CapBnd:	0000003fffffffff\n\
+            CapAmb:	0000000000000000\n\
+            NoNewPrivs:	1\n\
+            Seccomp:	2\n\
+            Speculation_Store_Bypass:	thread force mitigated\n\
+            Cpus_allowed:	ffffffff\n\
+            Cpus_allowed_list:	0-31\n\
+            Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\n\
+            Mems_allowed_list:	0\n\
+            voluntary_ctxt_switches:	5763536\n\
+            nonvoluntary_ctxt_switches:	584257\n";
+        let reader = io::BufReader::new(&input[..]);
+        lazy_static! {
+            static ref LINE_RE: Regex = Regex::new(r"^([^:]+):[\t ]*(.*)").unwrap();
+        }
+
+        smol::block_on(async {
+            let mut lines = reader.lines();
+            while let Some(line) = lines.next().await {
+                let line = line.unwrap();
+                let caps = LINE_RE.captures(&line).unwrap();
+                let label = caps.get(1).unwrap().as_str();
+                let value = caps.get(2).unwrap().as_str();
+                match label {
+                    "Name" => println!("Name={}", value),
+                    "Umask" => println!("Umask={}", value),
+                    "State" => println!("State={}", value),
+                    "PPid" => println!("PPid={}", value),
+                    "VmLck" => println!("VmLck={}", value),
+                    _ => println!("label={}, value={}", label, value),
+                }
+            }
+        });
     }
 }
