@@ -8,6 +8,7 @@ use async_fs::{read_dir, DirEntry, File};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
+use nix::unistd::{sysconf, SysconfVar};
 use regex::Regex;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
@@ -55,6 +56,13 @@ impl Process {
         }
         stat
     }
+
+    fn format_time(&self, herz: i64) -> String {
+        let t = self.utime + self.stime;
+        let u = (t as i64) / herz;
+
+        format!("{:3}:{:02}", u / 60, u % 60)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +89,7 @@ struct ProcessForestNode {
 struct ProcessForest {
     roots: BTreeSet<u32>,
     nodes: BTreeMap<u32, ProcessForestNode>,
+    herz: i64,
 }
 
 impl ProcessForest {
@@ -101,7 +110,11 @@ impl fmt::Display for ProcessForest {
         }
         pad_columns(&mut records);
         for record in records {
-            writeln!(f, "{} {} {}", record.pid, record.stat, record.cmdline)?;
+            writeln!(
+                f,
+                "{} {} {} {}",
+                record.pid, record.stat, record.time, record.cmdline
+            )?;
         }
         Ok(())
     }
@@ -110,6 +123,7 @@ impl fmt::Display for ProcessForest {
 struct OutputLineRecord {
     pid: String,
     stat: String,
+    time: String,
     cmdline: String,
 }
 
@@ -137,7 +151,6 @@ fn main() {
         let procs = all_procs(pids).await.unwrap();
         let matched_pids = match_cmdline(&procs, pattern.unwrap());
         let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
-        // println!("wanted_procs={:?}", wanted_procs);
         let proc_forest = build_process_forest(wanted_procs);
         println!("proc_forest=\n{}", proc_forest);
     });
@@ -357,7 +370,10 @@ fn build_process_forest(procs: BTreeMap<u32, Process>) -> ProcessForest {
             );
         }
     }
-    ProcessForest { roots, nodes }
+    let herz = sysconf(SysconfVar::CLK_TCK)
+        .expect("sysconf CLK_TCK")
+        .unwrap();
+    ProcessForest { roots, nodes, herz }
 }
 
 fn column_width_for_u32(n: u32) -> usize {
@@ -380,6 +396,7 @@ fn print_forest_helper(
     records.push(OutputLineRecord {
         pid: format!("{}", pid),
         stat: format!("{:4}", node.process.format_stat()),
+        time: format!("{:>6}", node.process.format_time(f.herz)),
         cmdline: format!(
             "{}{}",
             last_child_to_indent(&last_child),
