@@ -36,11 +36,10 @@ struct Process {
 impl Process {
     fn format_stat(&self) -> String {
         let mut stat = self.state.clone();
-        if self.nice < 0 {
-            stat.push('<');
-        }
-        if self.nice > 0 {
-            stat.push('N');
+        match self.nice.signum() {
+            1 => stat.push('<'),
+            -1 => stat.push('N'),
+            _ => {}
         }
         if self.vm_lock != 0 {
             stat.push('L');
@@ -171,6 +170,9 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
             (Ok(stat), Ok((mut cmdline, vm_lock))) => {
                 if stat.state == "Z" {
                     cmdline = format!("[{}] <defunct>", &stat.comm);
+                }
+                if cmdline == "" {
+                    cmdline = format!("[{}]", stat.comm);
                 }
                 let proc = Process {
                     pid,
