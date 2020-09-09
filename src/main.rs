@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 #[macro_use]
 extern crate lazy_static;
 
-use async_fs::{read_dir, DirEntry};
+use async_fs::{read_dir, DirEntry, File};
 use clap::{App, Arg};
-use futures_lite::future;
 use futures_lite::stream::{self, StreamExt};
+use futures_lite::*;
 use regex::Regex;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
@@ -22,6 +22,9 @@ struct Process {
     ppid: u32,
     state: String,
     cmdline: String,
+    utime: u32,
+    stime: u32,
+    vm_lock: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -128,8 +131,8 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
-        match future::zip(get_stat(pid), get_cmdline(pid)).await {
-            (Ok(stat), Ok(mut cmdline)) => {
+        match future::zip(get_stat(pid), get_cmdline_and_vm_lock(pid)).await {
+            (Ok(stat), Ok((mut cmdline, vm_lock))) => {
                 if stat.state == "Z" {
                     cmdline = format!("[{}] <defunct>", &stat.comm);
                 }
@@ -137,7 +140,10 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
                     pid,
                     ppid: stat.ppid,
                     state: stat.state,
+                    utime: stat.utime,
+                    stime: stat.stime,
                     cmdline,
+                    vm_lock,
                 };
                 pids.insert(pid, proc);
             }
@@ -151,7 +157,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
 async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     lazy_static! {
         // https://elixir.bootlin.com/linux/latest/C/ident/do_task_stat
-        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>\d+) (?P<nice>\d+) (?P<num_threads>\d+) (?P<itrealvalue>\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
+        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
     }
 
     let path = format!("/proc/{}/stat", pid);
@@ -171,6 +177,33 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
         utime,
         stime,
     })
+}
+
+async fn get_cmdline_and_vm_lock(pid: u32) -> io::Result<(String, u32)> {
+    match future::zip(get_cmdline(pid), read_vm_lock_in_status(pid)).await {
+        (Ok(cmdline), Ok(vm_lock)) => Ok((cmdline, vm_lock)),
+        (Err(e), _) => Err(e),
+        (_, Err(e)) => Err(e),
+    }
+}
+
+async fn read_vm_lock_in_status(pid: u32) -> io::Result<u32> {
+    let path = format!("/proc/{}/status", pid);
+    let file = File::open(path).await?;
+    let reader = smol::io::BufReader::new(file);
+    lazy_static! {
+        static ref VMLCK_RE: Regex = Regex::new(r"^VmLck:[\t ]*(\d+)").unwrap();
+    }
+
+    let mut lines = reader.lines();
+    let mut vm_lock = 0u32;
+    while let Some(line) = lines.next().await {
+        let line = line.unwrap();
+        if let Some(caps) = VMLCK_RE.captures(&line) {
+            vm_lock = caps.get(1).unwrap().as_str().parse::<u32>().unwrap();
+        }
+    }
+    Ok(vm_lock)
 }
 
 async fn get_cmdline(pid: u32) -> io::Result<String> {
@@ -355,6 +388,9 @@ mod test {
                 ppid: 0,
                 state: String::from("S"),
                 cmdline: String::from("init"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![2, 5],
         };
@@ -366,6 +402,9 @@ mod test {
                 ppid: 1,
                 state: String::from("S"),
                 cmdline: String::from("foo"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![3, 4],
         };
@@ -377,6 +416,9 @@ mod test {
                 ppid: 2,
                 state: String::from("S"),
                 cmdline: String::from("bar"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![6, 7],
         };
@@ -388,6 +430,9 @@ mod test {
                 ppid: 2,
                 state: String::from("S"),
                 cmdline: String::from("baz"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![10],
         };
@@ -399,6 +444,9 @@ mod test {
                 ppid: 1,
                 state: String::from("S"),
                 cmdline: String::from("hoge"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![8],
         };
@@ -410,6 +458,9 @@ mod test {
                 ppid: 3,
                 state: String::from("S"),
                 cmdline: String::from("huga"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![],
         };
@@ -421,6 +472,9 @@ mod test {
                 ppid: 3,
                 state: String::from("S"),
                 cmdline: String::from("yay"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![],
         };
@@ -432,6 +486,9 @@ mod test {
                 ppid: 5,
                 state: String::from("S"),
                 cmdline: String::from("ls"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![9],
         };
@@ -443,6 +500,9 @@ mod test {
                 ppid: 8,
                 state: String::from("S"),
                 cmdline: String::from("cat"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![],
         };
@@ -454,6 +514,9 @@ mod test {
                 ppid: 4,
                 state: String::from("S"),
                 cmdline: String::from("top"),
+                utime: 0,
+                stime: 0,
+                vm_lock: 0,
             },
             child_pids: vec![],
         };
@@ -474,82 +537,86 @@ mod test {
     fn test_read_proc_status() {
         // https://elixir.bootlin.com/linux/latest/C/ident/proc_pid_status
         // https://elixir.bootlin.com/linux/latest/C/ident/proc_task_name
-        let input = b"Name:	Web Content\n\
+        let input = b"Name:	mozc_server\n\
             Umask:	0002\n\
             State:	S (sleeping)\n\
-            Tgid:	208455\n\
+            Tgid:	1899\n\
             Ngid:	0\n\
-            Pid:	208455\n\
-            PPid:	208351\n\
+            Pid:	1899\n\
+            PPid:	1845\n\
             TracerPid:	0\n\
             Uid:	1000	1000	1000	1000\n\
             Gid:	1000	1000	1000	1000\n\
-            FDSize:	128\n\
+            FDSize:	64\n\
             Groups:	4 24 27 30 46 120 131 132 998 1000 \n\
-            NStgid:	208455\n\
-            NSpid:	208455\n\
-            NSpgid:	1955\n\
-            NSsid:	1955\n\
-            VmPeak:	 3872392 kB\n\
-            VmSize:	 3757184 kB\n\
-            VmLck:	       0 kB\n\
+            NStgid:	1899\n\
+            NSpid:	1899\n\
+            NSpgid:	1844\n\
+            NSsid:	1844\n\
+            VmPeak:	   74400 kB\n\
+            VmSize:	   74400 kB\n\
+            VmLck:	   12916 kB\n\
             VmPin:	       0 kB\n\
-            VmHWM:	  987072 kB\n\
-            VmRSS:	  606220 kB\n\
-            RssAnon:	  262300 kB\n\
-            RssFile:	  282628 kB\n\
-            RssShmem:	   61292 kB\n\
-            VmData:	  848068 kB\n\
-            VmStk:	     332 kB\n\
-            VmExe:	     584 kB\n\
-            VmLib:	  230568 kB\n\
-            VmPTE:	    4176 kB\n\
+            VmHWM:	   29056 kB\n\
+            VmRSS:	   29056 kB\n\
+            RssAnon:	    5288 kB\n\
+            RssFile:	   23768 kB\n\
+            RssShmem:	       0 kB\n\
+            VmData:	   46876 kB\n\
+            VmStk:	     132 kB\n\
+            VmExe:	    1340 kB\n\
+            VmLib:	    5048 kB\n\
+            VmPTE:	     116 kB\n\
             VmSwap:	       0 kB\n\
             HugetlbPages:	       0 kB\n\
             CoreDumping:	0\n\
             THP_enabled:	1\n\
-            Threads:	53\n\
-            SigQ:	0/62534\n\
+            Threads:	5\n\
+            SigQ:	1/62534\n\
             SigPnd:	0000000000000000\n\
             ShdPnd:	0000000000000000\n\
             SigBlk:	0000000000000000\n\
-            SigIgn:	0000000000011002\n\
-            SigCgt:	0000000fc08004f8\n\
+            SigIgn:	0000000008003800\n\
+            SigCgt:	0000000180000000\n\
             CapInh:	0000000000000000\n\
             CapPrm:	0000000000000000\n\
             CapEff:	0000000000000000\n\
             CapBnd:	0000003fffffffff\n\
             CapAmb:	0000000000000000\n\
-            NoNewPrivs:	1\n\
-            Seccomp:	2\n\
-            Speculation_Store_Bypass:	thread force mitigated\n\
+            NoNewPrivs:	0\n\
+            Seccomp:	0\n\
+            Speculation_Store_Bypass:	thread vulnerable\n\
             Cpus_allowed:	ffffffff\n\
             Cpus_allowed_list:	0-31\n\
             Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001\n\
             Mems_allowed_list:	0\n\
-            voluntary_ctxt_switches:	5763536\n\
-            nonvoluntary_ctxt_switches:	584257\n";
+            voluntary_ctxt_switches:	70\n\
+            nonvoluntary_ctxt_switches:	2\n";
         let reader = io::BufReader::new(&input[..]);
         lazy_static! {
-            static ref LINE_RE: Regex = Regex::new(r"^([^:]+):[\t ]*(.*)").unwrap();
+            static ref VMLCK_RE: Regex = Regex::new(r"^VmLck:[\t ]*(\d+)").unwrap();
         }
 
         smol::block_on(async {
             let mut lines = reader.lines();
             while let Some(line) = lines.next().await {
                 let line = line.unwrap();
-                let caps = LINE_RE.captures(&line).unwrap();
-                let label = caps.get(1).unwrap().as_str();
-                let value = caps.get(2).unwrap().as_str();
-                match label {
-                    "Name" => println!("Name={}", value),
-                    "Umask" => println!("Umask={}", value),
-                    "State" => println!("State={}", value),
-                    "PPid" => println!("PPid={}", value),
-                    "VmLck" => println!("VmLck={}", value),
-                    _ => println!("label={}, value={}", label, value),
+                if let Some(caps) = VMLCK_RE.captures(&line) {
+                    let value = caps.get(1).unwrap().as_str();
+                    println!("VmLck={}", value);
+                    break;
                 }
             }
         });
+    }
+
+    #[test]
+    fn test_stat_regex_captures() {
+        // let re = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
+
+        let re = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
+        // let caps = re.captures("3 (rcu_gp) I 2 0 0 0 -1 69238880 0 0 0 0 0 0 0 0 0 -20 1 0 15 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0");
+        let caps = re.captures("12 (migration/0) S 2 0 0 0 -1 69238848 0 0 0 0 1 0 0 0 -100 0 1 0 15 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 99 1 0 0 0 0 0 0 0 0 0 0 0");
+        println!("caps={:?}", caps);
     }
 }
