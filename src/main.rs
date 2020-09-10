@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 extern crate lazy_static;
 
 use async_fs::{read_dir, DirEntry, File};
-use chrono::{Duration, Local, TimeZone};
+use chrono::{DateTime, Duration, Local, TimeZone};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
@@ -59,12 +59,11 @@ impl Process {
         stat
     }
 
-    fn format_start_time(&self, herz: i64, btime: u64) -> String {
+    fn format_start_time(&self, herz: i64, btime: u64, now: DateTime<Local>) -> String {
         let start_time = Local.timestamp(
             i64::try_from(btime).unwrap() + i64::try_from(self.start_time).unwrap() / herz,
             0,
         );
-        let now = Local::now();
         let dur = now.signed_duration_since(start_time);
         if dur > Duration::hours(24) {
             start_time.format("%b%d").to_string()
@@ -108,6 +107,7 @@ struct ProcessForest {
     nodes: BTreeMap<u32, ProcessForestNode>,
     herz: i64,
     btime: u64,
+    now: DateTime<Local>,
 }
 
 impl ProcessForest {
@@ -171,7 +171,8 @@ fn main() {
         let matched_pids = match_cmdline(&procs, pattern.unwrap());
         let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
         let btime = get_btime().await.unwrap();
-        let proc_forest = build_process_forest(wanted_procs, btime);
+        let now = Local::now();
+        let proc_forest = build_process_forest(wanted_procs, btime, now);
         println!("proc_forest=\n{}", proc_forest);
     });
 }
@@ -374,7 +375,7 @@ fn get_matched_and_descendants(
     wanted_procs
 }
 
-fn build_process_forest(procs: BTreeMap<u32, Process>, btime: u64) -> ProcessForest {
+fn build_process_forest(procs: BTreeMap<u32, Process>, btime: u64, now: DateTime<Local>) -> ProcessForest {
     let mut roots = BTreeSet::new();
     let mut nodes = BTreeMap::new();
     for (pid, proc) in procs.iter() {
@@ -406,6 +407,7 @@ fn build_process_forest(procs: BTreeMap<u32, Process>, btime: u64) -> ProcessFor
         nodes,
         herz,
         btime,
+        now,
     }
 }
 
@@ -448,7 +450,7 @@ fn print_forest_helper(
     records.push(OutputLineRecord {
         pid: format!("{}", pid),
         stat: format!("{:4}", node.process.format_stat()),
-        start_time: format!("{:>6}", node.process.format_start_time(f.herz, f.btime)),
+        start_time: format!("{:>6}", node.process.format_start_time(f.herz, f.btime, f.now)),
         time: format!("{:>6}", node.process.format_time(f.herz)),
         cmdline: format!(
             "{}{}",
