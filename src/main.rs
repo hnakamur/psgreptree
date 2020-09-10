@@ -9,7 +9,7 @@ use chrono::{DateTime, Duration, Local, TimeZone};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
-use nix::unistd::{sysconf, SysconfVar};
+use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
@@ -27,12 +27,12 @@ struct Process {
     pgrp: u32,
     session: u32,
     tpgid: i32,
-    utime: u32,
-    stime: u32,
-    nice: i32,
+    utime: u64,
+    stime: u64,
+    nice: i64,
     num_threads: i32,
     start_time: u64,
-    vm_lock: u32,
+    vm_lock: u64,
     cmdline: String,
 }
 
@@ -88,11 +88,19 @@ struct ProcStat {
     pgrp: u32,
     session: u32,
     tpgid: i32,
-    utime: u32,
-    stime: u32,
-    nice: i32,
+    utime: u64,
+    stime: u64,
+    nice: i64,
     num_threads: i32,
     start_time: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ProcStatus {
+    euid: Uid,
+    vm_size: u64,
+    vm_lock: u64,
+    vm_rss: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -253,9 +261,9 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
         .parse::<u32>()
         .unwrap();
     let tpgid = cap.name("tpgid").unwrap().as_str().parse::<i32>().unwrap();
-    let utime = cap.name("utime").unwrap().as_str().parse::<u32>().unwrap();
-    let stime = cap.name("stime").unwrap().as_str().parse::<u32>().unwrap();
-    let nice = cap.name("nice").unwrap().as_str().parse::<i32>().unwrap();
+    let utime = cap.name("utime").unwrap().as_str().parse::<u64>().unwrap();
+    let stime = cap.name("stime").unwrap().as_str().parse::<u64>().unwrap();
+    let nice = cap.name("nice").unwrap().as_str().parse::<i64>().unwrap();
     let num_threads = cap
         .name("num_threads")
         .unwrap()
@@ -283,7 +291,7 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     })
 }
 
-async fn get_cmdline_and_vm_lock(pid: u32) -> io::Result<(String, u32)> {
+async fn get_cmdline_and_vm_lock(pid: u32) -> io::Result<(String, u64)> {
     match future::zip(get_cmdline(pid), read_vm_lock_in_status(pid)).await {
         (Ok(cmdline), Ok(vm_lock)) => Ok((cmdline, vm_lock)),
         (Err(e), _) => Err(e),
@@ -291,7 +299,7 @@ async fn get_cmdline_and_vm_lock(pid: u32) -> io::Result<(String, u32)> {
     }
 }
 
-async fn read_vm_lock_in_status(pid: u32) -> io::Result<u32> {
+async fn read_vm_lock_in_status(pid: u32) -> io::Result<u64> {
     let path = format!("/proc/{}/status", pid);
     let file = File::open(path).await?;
     let reader = smol::io::BufReader::new(file);
@@ -300,11 +308,11 @@ async fn read_vm_lock_in_status(pid: u32) -> io::Result<u32> {
     }
 
     let mut lines = reader.lines();
-    let mut vm_lock = 0u32;
+    let mut vm_lock = 0u64;
     while let Some(line) = lines.next().await {
         let line = line.unwrap();
         if let Some(caps) = VMLCK_RE.captures(&line) {
-            vm_lock = caps.get(1).unwrap().as_str().parse::<u32>().unwrap();
+            vm_lock = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
         }
     }
     Ok(vm_lock)
@@ -375,7 +383,11 @@ fn get_matched_and_descendants(
     wanted_procs
 }
 
-fn build_process_forest(procs: BTreeMap<u32, Process>, btime: u64, now: DateTime<Local>) -> ProcessForest {
+fn build_process_forest(
+    procs: BTreeMap<u32, Process>,
+    btime: u64,
+    now: DateTime<Local>,
+) -> ProcessForest {
     let mut roots = BTreeSet::new();
     let mut nodes = BTreeMap::new();
     for (pid, proc) in procs.iter() {
@@ -450,7 +462,10 @@ fn print_forest_helper(
     records.push(OutputLineRecord {
         pid: format!("{}", pid),
         stat: format!("{:4}", node.process.format_stat()),
-        start_time: format!("{:>6}", node.process.format_start_time(f.herz, f.btime, f.now)),
+        start_time: format!(
+            "{:>6}",
+            node.process.format_start_time(f.herz, f.btime, f.now)
+        ),
         time: format!("{:>6}", node.process.format_time(f.herz)),
         cmdline: format!(
             "{}{}",
@@ -723,6 +738,7 @@ mod test {
             nodes,
             herz: HERZ,
             btime: BTIME,
+            now: Local::now(),
         };
         let mut records = Vec::new();
         for pid in forest.roots.iter() {
