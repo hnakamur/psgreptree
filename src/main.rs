@@ -131,13 +131,46 @@ impl ProcessForest {
             0
         }
     }
+
+    fn print_forest_helper(
+        &self,
+        pid: u32,
+        last_child: Vec<bool>,
+        records: &mut Vec<OutputLineRecord>,
+    ) {
+        let node = self.nodes.get(&pid).unwrap();
+        records.push(OutputLineRecord {
+            pid: format!("{}", pid),
+            vsz: format!("{:>6}", node.process.vm_size),
+            rss: format!("{:>5}", node.process.vm_rss),
+            stat: format!("{:4}", node.process.format_stat()),
+            start_time: format!(
+                "{:>6}",
+                node.process.format_start_time(self.herz, self.btime, self.now)
+            ),
+            time: format!("{:>6}", node.process.format_time(self.herz)),
+            cmdline: format!(
+                "{}{}",
+                last_child_to_indent(&last_child),
+                node.process.cmdline
+            ),
+        });
+        let mut i = 0;
+        while i < node.child_pids.len() {
+            let child_pid = node.child_pids[i];
+            let mut last_child2 = last_child.clone();
+            last_child2.push(i == node.child_pids.len() - 1);
+            self.print_forest_helper(child_pid, last_child2, records);
+            i += 1;
+        }
+    }
 }
 
 impl fmt::Display for ProcessForest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut records = Vec::new();
         for pid in self.roots.iter() {
-            print_forest_helper(&self, *pid, vec![], &mut records);
+            self.print_forest_helper(*pid, vec![], &mut records);
         }
         pad_columns(&mut records);
         for record in records {
@@ -490,39 +523,6 @@ fn column_width_for_u32(n: u32) -> usize {
         n /= 10;
     }
     width
-}
-
-fn print_forest_helper(
-    f: &ProcessForest,
-    pid: u32,
-    last_child: Vec<bool>,
-    records: &mut Vec<OutputLineRecord>,
-) {
-    let node = f.nodes.get(&pid).unwrap();
-    records.push(OutputLineRecord {
-        pid: format!("{}", pid),
-        vsz: format!("{:>6}", node.process.vm_size),
-        rss: format!("{:>5}", node.process.vm_rss),
-        stat: format!("{:4}", node.process.format_stat()),
-        start_time: format!(
-            "{:>6}",
-            node.process.format_start_time(f.herz, f.btime, f.now)
-        ),
-        time: format!("{:>6}", node.process.format_time(f.herz)),
-        cmdline: format!(
-            "{}{}",
-            last_child_to_indent(&last_child),
-            node.process.cmdline
-        ),
-    });
-    let mut i = 0;
-    while i < node.child_pids.len() {
-        let child_pid = node.child_pids[i];
-        let mut last_child2 = last_child.clone();
-        last_child2.push(i == node.child_pids.len() - 1);
-        print_forest_helper(f, child_pid, last_child2, records);
-        i += 1;
-    }
 }
 
 fn last_child_to_indent(last_child: &[bool]) -> String {
