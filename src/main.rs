@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 extern crate lazy_static;
 
 use async_fs::{read_dir, DirEntry, File};
+use chrono::{Duration, Local, TimeZone};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
@@ -12,7 +13,7 @@ use nix::unistd::{sysconf, SysconfVar};
 use regex::Regex;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io;
 use std::process;
@@ -30,6 +31,7 @@ struct Process {
     stime: u32,
     nice: i32,
     num_threads: i32,
+    start_time: u64,
     vm_lock: u32,
     cmdline: String,
 }
@@ -57,6 +59,20 @@ impl Process {
         stat
     }
 
+    fn format_start_time(&self, herz: i64, btime: u64) -> String {
+        let start_time = Local.timestamp(
+            i64::try_from(btime).unwrap() + i64::try_from(self.start_time).unwrap() / herz,
+            0,
+        );
+        let now = Local::now();
+        let dur = now.signed_duration_since(start_time);
+        if dur > Duration::hours(24) {
+            start_time.format("%b%d").to_string()
+        } else {
+            start_time.format("%H:%M").to_string()
+        }
+    }
+
     fn format_time(&self, herz: i64) -> String {
         let t = self.utime + self.stime;
         let u = (t as i64) / herz;
@@ -77,6 +93,7 @@ struct ProcStat {
     stime: u32,
     nice: i32,
     num_threads: i32,
+    start_time: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +107,7 @@ struct ProcessForest {
     roots: BTreeSet<u32>,
     nodes: BTreeMap<u32, ProcessForestNode>,
     herz: i64,
+    btime: u64,
 }
 
 impl ProcessForest {
@@ -112,8 +130,8 @@ impl fmt::Display for ProcessForest {
         for record in records {
             writeln!(
                 f,
-                "{} {} {} {}",
-                record.pid, record.stat, record.time, record.cmdline
+                "{} {} {} {} {}",
+                record.pid, record.stat, record.start_time, record.time, record.cmdline
             )?;
         }
         Ok(())
@@ -123,6 +141,7 @@ impl fmt::Display for ProcessForest {
 struct OutputLineRecord {
     pid: String,
     stat: String,
+    start_time: String,
     time: String,
     cmdline: String,
 }
@@ -151,7 +170,8 @@ fn main() {
         let procs = all_procs(pids).await.unwrap();
         let matched_pids = match_cmdline(&procs, pattern.unwrap());
         let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
-        let proc_forest = build_process_forest(wanted_procs);
+        let btime = get_btime().await.unwrap();
+        let proc_forest = build_process_forest(wanted_procs, btime);
         println!("proc_forest=\n{}", proc_forest);
     });
 }
@@ -198,6 +218,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
                     stime: stat.stime,
                     nice: stat.nice,
                     num_threads: stat.num_threads,
+                    start_time: stat.start_time,
                     cmdline,
                     vm_lock,
                 };
@@ -240,6 +261,12 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
         .as_str()
         .parse::<i32>()
         .unwrap();
+    let start_time = cap
+        .name("starttime")
+        .unwrap()
+        .as_str()
+        .parse::<u64>()
+        .unwrap();
     Ok(ProcStat {
         comm,
         state,
@@ -251,6 +278,7 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
         stime,
         nice,
         num_threads,
+        start_time,
     })
 }
 
@@ -346,7 +374,7 @@ fn get_matched_and_descendants(
     wanted_procs
 }
 
-fn build_process_forest(procs: BTreeMap<u32, Process>) -> ProcessForest {
+fn build_process_forest(procs: BTreeMap<u32, Process>, btime: u64) -> ProcessForest {
     let mut roots = BTreeSet::new();
     let mut nodes = BTreeMap::new();
     for (pid, proc) in procs.iter() {
@@ -373,7 +401,31 @@ fn build_process_forest(procs: BTreeMap<u32, Process>) -> ProcessForest {
     let herz = sysconf(SysconfVar::CLK_TCK)
         .expect("sysconf CLK_TCK")
         .unwrap();
-    ProcessForest { roots, nodes, herz }
+    ProcessForest {
+        roots,
+        nodes,
+        herz,
+        btime,
+    }
+}
+
+async fn get_btime() -> io::Result<u64> {
+    const PATH: &str = "/proc/stat";
+    let file = File::open(PATH).await?;
+    let reader = smol::io::BufReader::new(file);
+    lazy_static! {
+        static ref BTIME_RE: Regex = Regex::new(r"^btime[\t ]+(\d+)").unwrap();
+    }
+
+    let mut lines = reader.lines();
+    let mut btime = 0u64;
+    while let Some(line) = lines.next().await {
+        let line = line.unwrap();
+        if let Some(caps) = BTIME_RE.captures(&line) {
+            btime = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
+        }
+    }
+    Ok(btime)
 }
 
 fn column_width_for_u32(n: u32) -> usize {
@@ -396,6 +448,7 @@ fn print_forest_helper(
     records.push(OutputLineRecord {
         pid: format!("{}", pid),
         stat: format!("{:4}", node.process.format_stat()),
+        start_time: format!("{:>6}", node.process.format_start_time(f.herz, f.btime)),
         time: format!("{:>6}", node.process.format_time(f.herz)),
         cmdline: format!(
             "{}{}",
@@ -474,6 +527,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![2, 5],
@@ -493,6 +547,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![3, 4],
@@ -512,6 +567,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![6, 7],
@@ -531,6 +587,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![10],
@@ -550,6 +607,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![8],
@@ -569,6 +627,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
@@ -588,6 +647,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
@@ -607,6 +667,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![9],
@@ -626,6 +687,7 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
@@ -645,13 +707,21 @@ mod test {
                 stime: 0,
                 nice: 0,
                 num_threads: 0,
+                start_time: 0,
                 vm_lock: 0,
             },
             child_pids: vec![],
         };
         nodes.insert(n10.process.pid, n10);
 
-        let forest = ProcessForest { roots, nodes };
+        const HERZ: i64 = 100;
+        const BTIME: u64 = 0;
+        let forest = ProcessForest {
+            roots,
+            nodes,
+            herz: HERZ,
+            btime: BTIME,
+        };
         let mut records = Vec::new();
         for pid in forest.roots.iter() {
             print_forest_helper(&forest, *pid, vec![], &mut records);
@@ -741,10 +811,7 @@ mod test {
 
     #[test]
     fn test_stat_regex_captures() {
-        // let re = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
-
         let re = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
-        // let caps = re.captures("3 (rcu_gp) I 2 0 0 0 -1 69238880 0 0 0 0 0 0 0 0 0 -20 1 0 15 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0");
         let caps = re.captures("12 (migration/0) S 2 0 0 0 -1 69238848 0 0 0 0 1 0 0 0 -100 0 1 0 15 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 99 1 0 0 0 0 0 0 0 0 0 0 0");
         println!("caps={:?}", caps);
     }
