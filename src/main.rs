@@ -32,8 +32,13 @@ struct Process {
     nice: i64,
     num_threads: i32,
     start_time: u64,
-    vm_lock: u64,
+
     cmdline: String,
+
+    euid: Uid,
+    vm_size: u64,
+    vm_lock: u64,
+    vm_rss: u64,
 }
 
 impl Process {
@@ -138,8 +143,8 @@ impl fmt::Display for ProcessForest {
         for record in records {
             writeln!(
                 f,
-                "{} {} {} {} {}",
-                record.pid, record.stat, record.start_time, record.time, record.cmdline
+                "{} {} {} {} {} {} {}",
+                record.pid, record.vsz, record.rss, record.stat, record.start_time, record.time, record.cmdline
             )?;
         }
         Ok(())
@@ -148,6 +153,8 @@ impl fmt::Display for ProcessForest {
 
 struct OutputLineRecord {
     pid: String,
+    vsz: String,
+    rss: String,
     stat: String,
     start_time: String,
     time: String,
@@ -177,7 +184,9 @@ fn main() {
         let pids = all_pids().await.unwrap();
         let procs = all_procs(pids).await.unwrap();
         let matched_pids = match_cmdline(&procs, pattern.unwrap());
-        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids);
+        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids)
+            .await
+            .unwrap();
         let btime = get_btime().await.unwrap();
         let now = Local::now();
         let proc_forest = build_process_forest(wanted_procs, btime, now);
@@ -208,8 +217,8 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
-        match future::zip(get_stat(pid), get_cmdline_and_vm_lock(pid)).await {
-            (Ok(stat), Ok((mut cmdline, vm_lock))) => {
+        match future::zip(read_stat(pid), read_cmdline(pid)).await {
+            (Ok(stat), Ok(mut cmdline)) => {
                 if stat.state == "Z" {
                     cmdline = format!("[{}] <defunct>", &stat.comm);
                 }
@@ -229,7 +238,10 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
                     num_threads: stat.num_threads,
                     start_time: stat.start_time,
                     cmdline,
-                    vm_lock,
+                    euid: Uid::from_raw(0),
+                    vm_size: 0,
+                    vm_lock: 0,
+                    vm_rss: 0,
                 };
                 pids.insert(pid, proc);
             }
@@ -240,7 +252,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     Ok(pids)
 }
 
-async fn get_stat(pid: u32) -> io::Result<ProcStat> {
+async fn read_stat(pid: u32) -> io::Result<ProcStat> {
     lazy_static! {
         // https://elixir.bootlin.com/linux/latest/C/ident/do_task_stat
         static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<cutime>-?\d+) (?P<cstime>-?\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
@@ -291,34 +303,56 @@ async fn get_stat(pid: u32) -> io::Result<ProcStat> {
     })
 }
 
-async fn get_cmdline_and_vm_lock(pid: u32) -> io::Result<(String, u64)> {
-    match future::zip(get_cmdline(pid), read_vm_lock_in_status(pid)).await {
-        (Ok(cmdline), Ok(vm_lock)) => Ok((cmdline, vm_lock)),
-        (Err(e), _) => Err(e),
-        (_, Err(e)) => Err(e),
-    }
-}
-
-async fn read_vm_lock_in_status(pid: u32) -> io::Result<u64> {
+async fn read_status(pid: u32) -> io::Result<ProcStatus> {
     let path = format!("/proc/{}/status", pid);
     let file = File::open(path).await?;
     let reader = smol::io::BufReader::new(file);
     lazy_static! {
-        static ref VMLCK_RE: Regex = Regex::new(r"^VmLck:[\t ]*(\d+)").unwrap();
+        static ref KEY_VAL_RE: Regex = Regex::new(r"^(.*?):[\t ]*(.+)").unwrap();
+        static ref EUID_RE: Regex = Regex::new(r"^\d+\t(\d+)").unwrap();
+        static ref KB_RE: Regex = Regex::new(r"^(\d+)").unwrap();
     }
 
-    let mut lines = reader.lines();
+    let mut euid: Uid = Uid::from_raw(0);
+    let mut vm_size = 0u64;
     let mut vm_lock = 0u64;
+    let mut vm_rss = 0u64;
+    let mut lines = reader.lines();
     while let Some(line) = lines.next().await {
         let line = line.unwrap();
-        if let Some(caps) = VMLCK_RE.captures(&line) {
-            vm_lock = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
+        if let Some(caps) = KEY_VAL_RE.captures(&line) {
+            let key = caps.get(1).unwrap().as_str();
+            let value = caps.get(2).unwrap().as_str();
+            match key {
+                "Uid" => {
+                    let caps = EUID_RE.captures(value).unwrap();
+                    euid = Uid::from_raw(caps.get(1).unwrap().as_str().parse::<u32>().unwrap());
+                }
+                "VmSize" => {
+                    let caps = KB_RE.captures(value).unwrap();
+                    vm_size = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
+                }
+                "VmLck" => {
+                    let caps = KB_RE.captures(value).unwrap();
+                    vm_lock = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
+                }
+                "VmRSS" => {
+                    let caps = KB_RE.captures(value).unwrap();
+                    vm_rss = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
+                }
+                _ => {}
+            }
         }
     }
-    Ok(vm_lock)
+    Ok(ProcStatus {
+        euid,
+        vm_size,
+        vm_lock,
+        vm_rss,
+    })
 }
 
-async fn get_cmdline(pid: u32) -> io::Result<String> {
+async fn read_cmdline(pid: u32) -> io::Result<String> {
     let path = format!("/proc/{}/cmdline", pid);
     let data = async_fs::read(path).await?;
     let raw_cmdline = String::from_utf8(data).unwrap();
@@ -338,10 +372,10 @@ fn match_cmdline(procs: &BTreeMap<u32, Process>, pattern: &str) -> BTreeSet<u32>
     pids
 }
 
-fn get_matched_and_descendants(
+async fn get_matched_and_descendants(
     procs: &BTreeMap<u32, Process>,
     matched_pids: &BTreeSet<u32>,
-) -> BTreeMap<u32, Process> {
+) -> io::Result<BTreeMap<u32, Process>> {
     let mut marks = HashMap::new();
     for pid in matched_pids.iter() {
         marks.insert(*pid, true);
@@ -377,10 +411,16 @@ fn get_matched_and_descendants(
     let mut wanted_procs = BTreeMap::new();
     for (pid, wanted) in marks.iter() {
         if *wanted {
-            wanted_procs.insert(*pid, procs.get(pid).unwrap().clone());
+            let mut proc = procs.get(pid).unwrap().clone();
+            let status = read_status(*pid).await.expect("read_status");
+            proc.euid = status.euid;
+            proc.vm_size = status.vm_size;
+            proc.vm_lock = status.vm_lock;
+            proc.vm_rss = status.vm_rss;
+            wanted_procs.insert(*pid, proc);
         }
     }
-    wanted_procs
+    Ok(wanted_procs)
 }
 
 fn build_process_forest(
@@ -461,6 +501,8 @@ fn print_forest_helper(
     let node = f.nodes.get(&pid).unwrap();
     records.push(OutputLineRecord {
         pid: format!("{}", pid),
+        vsz: format!("{:>6}", node.process.vm_size),
+        rss: format!("{:>5}", node.process.vm_rss),
         stat: format!("{:4}", node.process.format_stat()),
         start_time: format!(
             "{:>6}",
@@ -545,7 +587,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![2, 5],
         };
@@ -565,7 +610,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![3, 4],
         };
@@ -585,7 +633,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![6, 7],
         };
@@ -605,7 +656,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![10],
         };
@@ -625,7 +679,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![8],
         };
@@ -645,7 +702,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![],
         };
@@ -665,7 +725,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![],
         };
@@ -685,7 +748,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![9],
         };
@@ -705,7 +771,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![],
         };
@@ -725,7 +794,10 @@ mod test {
                 nice: 0,
                 num_threads: 0,
                 start_time: 0,
+                euid: Uid::from_raw(0),
+                vm_size: 0,
                 vm_lock: 0,
+                vm_rss: 0,
             },
             child_pids: vec![],
         };
