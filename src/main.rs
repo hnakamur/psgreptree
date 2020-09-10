@@ -9,7 +9,7 @@ use chrono::{DateTime, Duration, Local, TimeZone};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
-use nix::unistd::{sysconf, SysconfVar, Uid};
+use nix::unistd::{sysconf, SysconfVar, Uid, User};
 use regex::Regex;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
@@ -18,6 +18,7 @@ use std::fmt;
 use std::io;
 use std::process;
 use std::str;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 struct Process {
@@ -41,7 +42,29 @@ struct Process {
     vm_rss: u64,
 }
 
+const UNAME_OR_UID_COL_WIDTH: usize = 8;
+
 impl Process {
+    fn format_uname_or_uid(&self, uid: Uid) -> String {
+        lazy_static! {
+            static ref UNAME_CACHE: Mutex<UnameCache> = Mutex::new(UnameCache::new());
+        }
+        match UNAME_CACHE.lock().unwrap().get(uid) {
+            Ok(Some(uname)) => {
+                if uname.is_ascii() {
+                    if uname.len() <= UNAME_OR_UID_COL_WIDTH {
+                        format!("{:prec$}", uname, prec=UNAME_OR_UID_COL_WIDTH)
+                    } else {
+                        format!("{}+", uname.get(..UNAME_OR_UID_COL_WIDTH-1).unwrap())
+                    }
+                } else {
+                    format!("{:prec$}", uid, prec=UNAME_OR_UID_COL_WIDTH)
+                }
+            },
+            _ => format!("{:prec$}", uid, prec=UNAME_OR_UID_COL_WIDTH),
+        }
+    }
+
     fn format_stat(&self) -> String {
         let mut stat = self.state.clone();
         match self.nice.signum() {
@@ -140,6 +163,7 @@ impl ProcessForest {
     ) {
         let node = self.nodes.get(&pid).unwrap();
         records.push(OutputLineRecord {
+            uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
             pid: format!("{}", pid),
             vsz: format!("{:>6}", node.process.vm_size),
             rss: format!("{:>5}", node.process.vm_rss),
@@ -176,15 +200,40 @@ impl fmt::Display for ProcessForest {
         for record in records {
             writeln!(
                 f,
-                "{} {} {} {} {} {} {}",
-                record.pid, record.vsz, record.rss, record.stat, record.start_time, record.time, record.cmdline
+                "{} {} {} {} {} {} {} {}",
+                record.uname_or_uid, record.pid, record.vsz, record.rss, record.stat, record.start_time, record.time, record.cmdline
             )?;
         }
         Ok(())
     }
 }
 
+#[derive(Debug, Clone)]
+struct UnameCache(HashMap<Uid, Option<String>>);
+
+impl UnameCache {
+    fn new() -> UnameCache {
+        UnameCache(HashMap::new())
+    }
+
+    fn get(&mut self, uid: Uid) -> io::Result<Option<String>> {
+        if self.0.contains_key(&uid) {
+            let uname = self.0.get(&uid).unwrap().clone();
+            Ok(uname)
+        } else {
+            let uname = if let Some(user) = User::from_uid(uid).expect("user") {
+                Some(user.name)
+            } else {
+                None
+            };
+            self.0.insert(uid, uname.clone());
+            Ok(uname)
+        }
+    }
+}
+
 struct OutputLineRecord {
+    uname_or_uid: String,
     pid: String,
     vsz: String,
     rss: String,
@@ -814,7 +863,7 @@ mod test {
         };
         let mut records = Vec::new();
         for pid in forest.roots.iter() {
-            print_forest_helper(&forest, *pid, vec![], &mut records);
+            forest.print_forest_helper( *pid, vec![], &mut records);
         }
         pad_columns(&mut records);
         for record in records {
