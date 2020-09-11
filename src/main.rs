@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, Local, TimeZone};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
+use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid, User};
 use regex::Regex;
 use std::cmp;
@@ -53,15 +54,36 @@ impl Process {
             Ok(Some(uname)) => {
                 if uname.is_ascii() {
                     if uname.len() <= UNAME_OR_UID_COL_WIDTH {
-                        format!("{:prec$}", uname, prec=UNAME_OR_UID_COL_WIDTH)
+                        format!("{:prec$}", uname, prec = UNAME_OR_UID_COL_WIDTH)
                     } else {
-                        format!("{}+", uname.get(..UNAME_OR_UID_COL_WIDTH-1).unwrap())
+                        format!("{}+", uname.get(..UNAME_OR_UID_COL_WIDTH - 1).unwrap())
                     }
                 } else {
-                    format!("{:prec$}", uid, prec=UNAME_OR_UID_COL_WIDTH)
+                    format!("{:prec$}", uid, prec = UNAME_OR_UID_COL_WIDTH)
                 }
-            },
-            _ => format!("{:prec$}", uid, prec=UNAME_OR_UID_COL_WIDTH),
+            }
+            _ => format!("{:prec$}", uid, prec = UNAME_OR_UID_COL_WIDTH),
+        }
+    }
+
+    fn format_cpu_percent(&self, herz: i64, uptime: std::time::Duration) -> String {
+        let total_time = (self.utime + self.stime) / (herz as u64);
+        let etime = if uptime.as_secs() >= self.start_time / (herz as u64) {
+            uptime.as_secs() - self.start_time / (herz as u64)
+        } else {
+            0
+        };
+
+        let cpu_percent = if etime > 0 {
+            total_time * 1000 / etime
+        } else {
+            0
+        };
+
+        if cpu_percent > 999 {
+            format!("{:>4}", cpu_percent / 10)
+        } else {
+            format!("{:>2}.{}", cpu_percent / 10, cpu_percent % 10)
         }
     }
 
@@ -143,6 +165,7 @@ struct ProcessForest {
     nodes: BTreeMap<u32, ProcessForestNode>,
     herz: i64,
     btime: u64,
+    uptime: std::time::Duration,
     now: DateTime<Local>,
 }
 
@@ -165,12 +188,14 @@ impl ProcessForest {
         records.push(OutputLineRecord {
             uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
             pid: format!("{}", pid),
+            cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
             vsz: format!("{:>6}", node.process.vm_size),
             rss: format!("{:>5}", node.process.vm_rss),
             stat: format!("{:4}", node.process.format_stat()),
             start_time: format!(
                 "{:>6}",
-                node.process.format_start_time(self.herz, self.btime, self.now)
+                node.process
+                    .format_start_time(self.herz, self.btime, self.now)
             ),
             time: format!("{:>6}", node.process.format_time(self.herz)),
             cmdline: format!(
@@ -200,8 +225,16 @@ impl fmt::Display for ProcessForest {
         for record in records {
             writeln!(
                 f,
-                "{} {} {} {} {} {} {} {}",
-                record.uname_or_uid, record.pid, record.vsz, record.rss, record.stat, record.start_time, record.time, record.cmdline
+                "{} {} {} {} {} {} {} {} {}",
+                record.uname_or_uid,
+                record.pid,
+                record.cpu_percent,
+                record.vsz,
+                record.rss,
+                record.stat,
+                record.start_time,
+                record.time,
+                record.cmdline
             )?;
         }
         Ok(())
@@ -235,6 +268,7 @@ impl UnameCache {
 struct OutputLineRecord {
     uname_or_uid: String,
     pid: String,
+    cpu_percent: String,
     vsz: String,
     rss: String,
     stat: String,
@@ -536,11 +570,13 @@ fn build_process_forest(
     let herz = sysconf(SysconfVar::CLK_TCK)
         .expect("sysconf CLK_TCK")
         .unwrap();
+    let sysinfo = sysinfo::sysinfo().expect("sysinfo");
     ProcessForest {
         roots,
         nodes,
         herz,
         btime,
+        uptime: sysinfo.uptime(),
         now,
     }
 }
@@ -859,11 +895,12 @@ mod test {
             nodes,
             herz: HERZ,
             btime: BTIME,
+            uptime: std::time::Duration::from_secs(0),
             now: Local::now(),
         };
         let mut records = Vec::new();
         for pid in forest.roots.iter() {
-            forest.print_forest_helper( *pid, vec![], &mut records);
+            forest.print_forest_helper(*pid, vec![], &mut records);
         }
         pad_columns(&mut records);
         for record in records {
