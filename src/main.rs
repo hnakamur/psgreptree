@@ -87,6 +87,11 @@ impl Process {
         }
     }
 
+    fn format_mem_percent(&self, ram_total: u64) -> String {
+        let mem_percent = (self.vm_rss * 1000 / (ram_total / 1024)).min(999);
+        format!("{:>2}.{}", mem_percent / 10, mem_percent % 10)
+    }
+
     fn format_stat(&self) -> String {
         let mut stat = self.state.clone();
         match self.nice.signum() {
@@ -167,6 +172,7 @@ struct ProcessForest {
     btime: u64,
     uptime: std::time::Duration,
     now: DateTime<Local>,
+    ram_total: u64,
 }
 
 impl ProcessForest {
@@ -189,6 +195,7 @@ impl ProcessForest {
             uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
             pid: format!("{}", pid),
             cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
+            mem_percent: node.process.format_mem_percent(self.ram_total),
             vsz: format!("{:>6}", node.process.vm_size),
             rss: format!("{:>5}", node.process.vm_rss),
             stat: format!("{:4}", node.process.format_stat()),
@@ -225,10 +232,11 @@ impl fmt::Display for ProcessForest {
         for record in records {
             writeln!(
                 f,
-                "{} {} {} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {} {} {}",
                 record.uname_or_uid,
                 record.pid,
                 record.cpu_percent,
+                record.mem_percent,
                 record.vsz,
                 record.rss,
                 record.stat,
@@ -269,6 +277,7 @@ struct OutputLineRecord {
     uname_or_uid: String,
     pid: String,
     cpu_percent: String,
+    mem_percent: String,
     vsz: String,
     rss: String,
     stat: String,
@@ -578,6 +587,7 @@ fn build_process_forest(
         btime,
         uptime: sysinfo.uptime(),
         now,
+        ram_total: sysinfo.ram_total(),
     }
 }
 
@@ -897,6 +907,7 @@ mod test {
             btime: BTIME,
             uptime: std::time::Duration::from_secs(0),
             now: Local::now(),
+            ram_total: 1,
         };
         let mut records = Vec::new();
         for pid in forest.roots.iter() {
