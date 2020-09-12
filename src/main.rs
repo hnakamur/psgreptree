@@ -31,6 +31,7 @@ struct Process {
     ppid: u32,
     pgrp: u32,
     session: u32,
+    tty_nr: i32,
     tpgid: i32,
     utime: u64,
     stime: u64,
@@ -145,6 +146,7 @@ struct ProcStat {
     ppid: u32,
     pgrp: u32,
     session: u32,
+    tty_nr: i32,
     tpgid: i32,
     utime: u64,
     stime: u64,
@@ -201,6 +203,9 @@ impl ProcessForest {
             mem_percent: node.process.format_mem_percent(self.ram_total),
             vsz: format!("{:>6}", node.process.vm_size),
             rss: format!("{:>5}", node.process.vm_rss),
+            tty: smol::block_on(async {
+                tty::format_tty(node.process.tty_nr, node.process.pid).await.unwrap()
+            }),
             stat: format!("{:4}", node.process.format_stat()),
             start_time: format!(
                 "{:>6}",
@@ -235,13 +240,14 @@ impl fmt::Display for ProcessForest {
         for record in records {
             writeln!(
                 f,
-                "{} {} {} {} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {} {} {} {}",
                 record.uname_or_uid,
                 record.pid,
                 record.cpu_percent,
                 record.mem_percent,
                 record.vsz,
                 record.rss,
+                record.tty,
                 record.stat,
                 record.start_time,
                 record.time,
@@ -284,6 +290,7 @@ struct OutputLineRecord {
     vsz: String,
     rss: String,
     stat: String,
+    tty: String,
     start_time: String,
     time: String,
     cmdline: String,
@@ -304,7 +311,7 @@ fn main() {
         )
         .get_matches();
     let pattern = matches.value_of("pattern");
-    println!("pattern={:?}", pattern);
+    // println!("pattern={:?}", pattern);
 
     std::env::set_var("SMOL_THREADS", format!("{}", num_cpus::get()));
 
@@ -318,8 +325,6 @@ fn main() {
         let btime = get_btime().await.unwrap();
         let now = Local::now();
         let proc_forest = build_process_forest(wanted_procs, btime, now);
-        let tty_drivers = tty::load_tty_drivers().await.unwrap();
-        println!("tty_drivers={:?}", tty_drivers);
         println!("proc_forest=\n{}", proc_forest);
     });
 }
@@ -361,6 +366,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
                     state: stat.state,
                     pgrp: stat.pgrp,
                     session: stat.session,
+                    tty_nr: stat.tty_nr,
                     tpgid: stat.tpgid,
                     utime: stat.utime,
                     stime: stat.stime,
@@ -402,6 +408,7 @@ async fn read_stat(pid: u32) -> io::Result<ProcStat> {
         .as_str()
         .parse::<u32>()
         .unwrap();
+    let tty_nr = cap.name("tty_nr").unwrap().as_str().parse::<i32>().unwrap();
     let tpgid = cap.name("tpgid").unwrap().as_str().parse::<i32>().unwrap();
     let utime = cap.name("utime").unwrap().as_str().parse::<u64>().unwrap();
     let stime = cap.name("stime").unwrap().as_str().parse::<u64>().unwrap();
@@ -424,6 +431,7 @@ async fn read_stat(pid: u32) -> io::Result<ProcStat> {
         ppid,
         pgrp,
         session,
+        tty_nr,
         tpgid,
         utime,
         stime,
@@ -645,10 +653,17 @@ fn get_max_pid_column_width(records: &[OutputLineRecord]) -> usize {
     records.iter().fold(0, |acc, x| cmp::max(acc, x.pid.len()))
 }
 
+const VSZ_COLUMN_WIDTH: usize = 6;
+const RSS_COLUMN_WIDTH: usize = 5;
+const TTY_COLUMN_WIDTH: usize = 6;
+
 fn pad_columns(records: &mut Vec<OutputLineRecord>) {
     let width = get_max_pid_column_width(&records);
     for record in records {
         record.pid = format!("{:>prec$}", record.pid, prec = width);
+
+        let tty_width = (TTY_COLUMN_WIDTH - (record.vsz.len() - VSZ_COLUMN_WIDTH) - (record.rss.len() - RSS_COLUMN_WIDTH)).max(1);
+        record.tty = format!("{:prec$}", record.tty, prec = tty_width);
     }
 }
 
@@ -683,6 +698,7 @@ mod test {
                 cmdline: String::from("init"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -706,6 +722,7 @@ mod test {
                 cmdline: String::from("foo"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -729,6 +746,7 @@ mod test {
                 cmdline: String::from("bar"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -752,6 +770,7 @@ mod test {
                 cmdline: String::from("baz"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -775,6 +794,7 @@ mod test {
                 cmdline: String::from("hoge"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -798,6 +818,7 @@ mod test {
                 cmdline: String::from("huga"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -821,6 +842,7 @@ mod test {
                 cmdline: String::from("yay"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -844,6 +866,7 @@ mod test {
                 cmdline: String::from("ls"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -867,6 +890,7 @@ mod test {
                 cmdline: String::from("cat"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -890,6 +914,7 @@ mod test {
                 cmdline: String::from("top"),
                 pgrp: 0,
                 session: 0,
+                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
