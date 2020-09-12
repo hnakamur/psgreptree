@@ -1,6 +1,3 @@
-#![feature(map_first_last)]
-use std::collections::BTreeMap;
-
 #[macro_use]
 extern crate lazy_static;
 
@@ -13,8 +10,7 @@ use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid, User};
 use regex::Regex;
 use smol::io::AsyncBufReadExt;
-use std::cmp;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io;
@@ -52,9 +48,9 @@ const CPU_PERCENT_COLUMN_WIDTH: usize = 4;
 const MEM_PERCENT_COLUMN_WIDTH: usize = 4;
 const VSZ_COLUMN_WIDTH: usize = 6;
 const RSS_COLUMN_WIDTH: usize = 5;
-const TTY_COLUMN_WIDTH: usize = 6;
+const TTY_COLUMN_WIDTH: usize = 8;
 const STAT_COLUMN_WIDTH: usize = 4;
-const START_COLUMN_WIDTH: usize = 6;
+const START_COLUMN_WIDTH: usize = 5;
 const TIME_COLUMN_WIDTH: usize = 6;
 
 impl Process {
@@ -189,14 +185,6 @@ struct ProcessForest {
 }
 
 impl ProcessForest {
-    fn pid_column_width(&self) -> usize {
-        if let Some((pid, _)) = self.nodes.last_key_value() {
-            column_width_for_u32(*pid)
-        } else {
-            0
-        }
-    }
-
     fn print_forest_helper(
         &self,
         pid: u32,
@@ -209,8 +197,8 @@ impl ProcessForest {
             pid: format!("{}", pid),
             cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
             mem_percent: node.process.format_mem_percent(self.ram_total),
-            vsz: format!("{:>vsz_w$}", node.process.vm_size, vsz_w = VSZ_COLUMN_WIDTH,),
-            rss: format!("{:>rss_w$}", node.process.vm_rss, rss_w = RSS_COLUMN_WIDTH,),
+            vsz: format!("{}", node.process.vm_size),
+            rss: format!("{}", node.process.vm_rss),
             tty: smol::block_on(async {
                 tty::format_tty(node.process.tty_nr, node.process.pid)
                     .await
@@ -219,18 +207,18 @@ impl ProcessForest {
             stat: format!(
                 "{:stat_w$}",
                 node.process.format_stat(),
-                stat_w = STAT_COLUMN_WIDTH,
+                stat_w = STAT_COLUMN_WIDTH
             ),
             start_time: format!(
                 "{:start_w$}",
                 node.process
                     .format_start_time(self.herz, self.btime, self.now,),
-                start_w = START_COLUMN_WIDTH,
+                start_w = START_COLUMN_WIDTH
             ),
             time: format!(
                 "{:>time_w$}",
                 node.process.format_time(self.herz),
-                time_w = TIME_COLUMN_WIDTH,
+                time_w = TIME_COLUMN_WIDTH
             ),
             cmdline: format!(
                 "{}{}",
@@ -257,13 +245,13 @@ impl fmt::Display for ProcessForest {
         for pid in self.roots.iter() {
             self.print_forest_helper(*pid, vec![], &mut records);
         }
-        pad_columns(&mut records);
+        let pid_w = smol::block_on(async { get_pid_digits().await });
         writeln!(
             f,
             "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:tty_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
             "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", COMMAND_LABEL,
             user_w=UNAME_OR_UID_COL_WIDTH,
-            pid_w=records[0].pid.len(),
+            pid_w=pid_w,
             cpu_w=CPU_PERCENT_COLUMN_WIDTH,
             mem_w=MEM_PERCENT_COLUMN_WIDTH,
             vsz_w=VSZ_COLUMN_WIDTH,
@@ -274,9 +262,33 @@ impl fmt::Display for ProcessForest {
             time_w=TIME_COLUMN_WIDTH,
         )?;
         for record in records {
+            let vsz_over = if record.vsz.len() > VSZ_COLUMN_WIDTH {
+                record.vsz.len() - VSZ_COLUMN_WIDTH
+            } else {
+                0
+            };
+            let rss_w = if vsz_over == 0 {
+                RSS_COLUMN_WIDTH
+            } else if vsz_over < RSS_COLUMN_WIDTH {
+                RSS_COLUMN_WIDTH - vsz_over
+            } else {
+                1
+            };
+            let rss_over = if record.rss.len() > rss_w {
+                record.rss.len() - rss_w
+            } else {
+                0
+            };
+            let tty_w = if rss_over == 0 {
+                TTY_COLUMN_WIDTH
+            } else if rss_over < TTY_COLUMN_WIDTH {
+                TTY_COLUMN_WIDTH - rss_over
+            } else {
+                1
+            };
             writeln!(
                 f,
-                "{} {} {} {} {} {} {} {} {} {} {}",
+                "{} {:>pid_w$} {} {} {:>vsz_w$} {:>rss_w$} {:tty_w$} {} {} {} {}",
                 record.uname_or_uid,
                 record.pid,
                 record.cpu_percent,
@@ -287,11 +299,28 @@ impl fmt::Display for ProcessForest {
                 record.stat,
                 record.start_time,
                 record.time,
-                record.cmdline
+                record.cmdline,
+                pid_w = pid_w,
+                vsz_w = VSZ_COLUMN_WIDTH,
+                rss_w = rss_w,
+                tty_w = tty_w,
             )?;
         }
         Ok(())
     }
+}
+
+async fn get_pid_digits() -> usize {
+    const DEFAULT_WIDTH: usize = 5;
+    async_fs::read("/proc/sys/kernel/pid_max")
+        .await
+        .map_or(DEFAULT_WIDTH, |data| {
+            str::from_utf8(&data).map_or(DEFAULT_WIDTH, |text| {
+                text.trim()
+                    .parse::<u32>()
+                    .map_or(DEFAULT_WIDTH, |max_pid| column_width_for_u32(max_pid - 1))
+            })
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -683,23 +712,6 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
         i += 1;
     }
     indent
-}
-
-fn get_max_pid_column_width(records: &[OutputLineRecord]) -> usize {
-    records.iter().fold(0, |acc, x| cmp::max(acc, x.pid.len()))
-}
-
-fn pad_columns(records: &mut Vec<OutputLineRecord>) {
-    let width = get_max_pid_column_width(&records);
-    for record in records {
-        record.pid = format!("{:>prec$}", record.pid, prec = width);
-
-        let tty_width = (TTY_COLUMN_WIDTH
-            - (record.vsz.len() - VSZ_COLUMN_WIDTH)
-            - (record.rss.len() - RSS_COLUMN_WIDTH))
-            .max(1);
-        record.tty = format!("{:prec$}", record.tty, prec = tty_width);
-    }
 }
 
 mod test {
