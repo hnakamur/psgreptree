@@ -364,19 +364,17 @@ struct OutputLineRecord {
 fn main() {
     let matches = App::new("psgreptree")
         .version("0.1.0")
-        .author("Kevin K. <kbknapp@gmail.com>")
-        .about("Does awesome things")
+        .author("Hiroaki Nakamura <hnakamur@gmail.com>")
+        .about("show process tree filtered by pattern match for command lines")
         .arg(
-            Arg::with_name("pattern")
-                .short("r")
-                .long("pattern")
-                .value_name("REGEX")
+            Arg::with_name("PATTERN")
+                .value_name("pattern")
                 .help("Sets a regular expression to match process command lines")
-                .takes_value(true),
+                .default_value(".*")
+                .index(1),
         )
         .get_matches();
-    let pattern = matches.value_of("pattern");
-    // println!("pattern={:?}", pattern);
+    let pattern = matches.value_of("PATTERN");
 
     std::env::set_var("SMOL_THREADS", format!("{}", num_cpus::get()));
 
