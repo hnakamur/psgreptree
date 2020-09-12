@@ -48,6 +48,14 @@ struct Process {
 }
 
 const UNAME_OR_UID_COL_WIDTH: usize = 8;
+const CPU_PERCENT_COLUMN_WIDTH: usize = 4;
+const MEM_PERCENT_COLUMN_WIDTH: usize = 4;
+const VSZ_COLUMN_WIDTH: usize = 6;
+const RSS_COLUMN_WIDTH: usize = 5;
+const TTY_COLUMN_WIDTH: usize = 6;
+const STAT_COLUMN_WIDTH: usize = 4;
+const START_COLUMN_WIDTH: usize = 6;
+const TIME_COLUMN_WIDTH: usize = 6;
 
 impl Process {
     fn format_uname_or_uid(&self, uid: Uid) -> String {
@@ -201,18 +209,29 @@ impl ProcessForest {
             pid: format!("{}", pid),
             cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
             mem_percent: node.process.format_mem_percent(self.ram_total),
-            vsz: format!("{:>6}", node.process.vm_size),
-            rss: format!("{:>5}", node.process.vm_rss),
+            vsz: format!("{:>vsz_w$}", node.process.vm_size, vsz_w = VSZ_COLUMN_WIDTH,),
+            rss: format!("{:>rss_w$}", node.process.vm_rss, rss_w = RSS_COLUMN_WIDTH,),
             tty: smol::block_on(async {
-                tty::format_tty(node.process.tty_nr, node.process.pid).await.unwrap()
+                tty::format_tty(node.process.tty_nr, node.process.pid)
+                    .await
+                    .unwrap()
             }),
-            stat: format!("{:4}", node.process.format_stat()),
-            start_time: format!(
-                "{:>6}",
-                node.process
-                    .format_start_time(self.herz, self.btime, self.now)
+            stat: format!(
+                "{:stat_w$}",
+                node.process.format_stat(),
+                stat_w = STAT_COLUMN_WIDTH,
             ),
-            time: format!("{:>6}", node.process.format_time(self.herz)),
+            start_time: format!(
+                "{:start_w$}",
+                node.process
+                    .format_start_time(self.herz, self.btime, self.now,),
+                start_w = START_COLUMN_WIDTH,
+            ),
+            time: format!(
+                "{:>time_w$}",
+                node.process.format_time(self.herz),
+                time_w = TIME_COLUMN_WIDTH,
+            ),
             cmdline: format!(
                 "{}{}",
                 last_child_to_indent(&last_child),
@@ -230,6 +249,8 @@ impl ProcessForest {
     }
 }
 
+const COMMAND_LABEL: &str = "COMMAND";
+
 impl fmt::Display for ProcessForest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut records = Vec::new();
@@ -237,6 +258,21 @@ impl fmt::Display for ProcessForest {
             self.print_forest_helper(*pid, vec![], &mut records);
         }
         pad_columns(&mut records);
+        writeln!(
+            f,
+            "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:tty_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
+            "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", COMMAND_LABEL,
+            user_w=UNAME_OR_UID_COL_WIDTH,
+            pid_w=records[0].pid.len(),
+            cpu_w=CPU_PERCENT_COLUMN_WIDTH,
+            mem_w=MEM_PERCENT_COLUMN_WIDTH,
+            vsz_w=VSZ_COLUMN_WIDTH,
+            rss_w=RSS_COLUMN_WIDTH,
+            tty_w=TTY_COLUMN_WIDTH,
+            stat_w=STAT_COLUMN_WIDTH,
+            start_w=START_COLUMN_WIDTH,
+            time_w=TIME_COLUMN_WIDTH,
+        )?;
         for record in records {
             writeln!(
                 f,
@@ -325,7 +361,7 @@ fn main() {
         let btime = get_btime().await.unwrap();
         let now = Local::now();
         let proc_forest = build_process_forest(wanted_procs, btime, now);
-        println!("proc_forest=\n{}", proc_forest);
+        print!("{}", proc_forest);
     });
 }
 
@@ -653,26 +689,23 @@ fn get_max_pid_column_width(records: &[OutputLineRecord]) -> usize {
     records.iter().fold(0, |acc, x| cmp::max(acc, x.pid.len()))
 }
 
-const VSZ_COLUMN_WIDTH: usize = 6;
-const RSS_COLUMN_WIDTH: usize = 5;
-const TTY_COLUMN_WIDTH: usize = 6;
-
 fn pad_columns(records: &mut Vec<OutputLineRecord>) {
     let width = get_max_pid_column_width(&records);
     for record in records {
         record.pid = format!("{:>prec$}", record.pid, prec = width);
 
-        let tty_width = (TTY_COLUMN_WIDTH - (record.vsz.len() - VSZ_COLUMN_WIDTH) - (record.rss.len() - RSS_COLUMN_WIDTH)).max(1);
+        let tty_width = (TTY_COLUMN_WIDTH
+            - (record.vsz.len() - VSZ_COLUMN_WIDTH)
+            - (record.rss.len() - RSS_COLUMN_WIDTH))
+            .max(1);
         record.tty = format!("{:prec$}", record.tty, prec = tty_width);
     }
 }
-
 
 mod test {
     use super::*;
     use smol::io::{self, AsyncBufReadExt};
     use std::collections::{BTreeMap, BTreeSet};
-
 
     #[test]
     fn test_column_width_for_u32() {
