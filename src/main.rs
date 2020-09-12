@@ -332,18 +332,11 @@ impl UnameCache {
     }
 
     fn get(&mut self, uid: Uid) -> io::Result<Option<String>> {
-        if self.0.contains_key(&uid) {
-            let uname = self.0.get(&uid).unwrap().clone();
-            Ok(uname)
-        } else {
-            let uname = if let Some(user) = User::from_uid(uid).expect("user") {
-                Some(user.name)
-            } else {
-                None
-            };
-            self.0.insert(uid, uname.clone());
-            Ok(uname)
-        }
+        Ok(self
+            .0
+            .entry(uid)
+            .or_insert_with(|| User::from_uid(uid).expect("user").map(|u| u.name))
+            .clone())
     }
 }
 
@@ -988,7 +981,6 @@ mod test {
         for pid in forest.roots.iter() {
             forest.print_forest_helper(*pid, vec![], &mut records);
         }
-        pad_columns(&mut records);
         for record in records {
             println!("{} {}", record.pid, record.cmdline);
         }
