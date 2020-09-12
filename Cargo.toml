@@ -1,8 +1,15 @@
 [package]
-name = "smol-experiment"
+name = "psgreptree"
 version = "0.1.0"
 authors = ["Hiroaki Nakamura <hnakamur@gmail.com>"]
 edition = "2018"
+description = "grep process by commands and print descendants tree"
+license = "Apache-2.0 OR MIT"
+keywords = ["process", "linux", "tree"]
+
+[[bin]]
+name = "pgt"
+path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

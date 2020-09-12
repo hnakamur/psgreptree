@@ -407,6 +407,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "psgreptree"
+version = "0.1.0"
+dependencies = [
+ "async-fs",
+ "chrono",
+ "clap",
+ "futures-lite",
+ "lazy_static",
+ "nix",
+ "num_cpus",
+ "regex",
+ "shellwords",
+ "smol",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.1.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -476,22 +492,6 @@ dependencies = [
  "blocking",
  "futures-lite",
  "once_cell",
-]
-
-[[package]]
-name = "smol-experiment"
-version = "0.1.0"
-dependencies = [
- "async-fs",
- "chrono",
- "clap",
- "futures-lite",
- "lazy_static",
- "nix",
- "num_cpus",
- "regex",
- "shellwords",
- "smol",
 ]
 
 [[package]]
