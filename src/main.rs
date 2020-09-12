@@ -12,6 +12,7 @@ use futures_lite::*;
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid, User};
 use regex::Regex;
+use smol::io::AsyncBufReadExt;
 use std::cmp;
 use std::collections::{BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
@@ -647,10 +648,112 @@ fn pad_columns(records: &mut Vec<OutputLineRecord>) {
     }
 }
 
+// /proc/tty/drivers
+// https://elixir.bootlin.com/linux/latest/C/ident/proc_tty_init
+// https://elixir.bootlin.com/linux/latest/C/ident/tty_drivers_op
+// https://elixir.bootlin.com/linux/latest/C/ident/show_tty_driver
+// https://elixir.bootlin.com/linux/latest/C/ident/show_tty_range
+//
+// $ cat /proc/tty/drivers
+// /dev/tty             /dev/tty        5       0 system:/dev/tty
+// /dev/console         /dev/console    5       1 system:console
+// /dev/ptmx            /dev/ptmx       5       2 system
+// /dev/vc/0            /dev/vc/0       4       0 system:vtmaster
+// rfcomm               /dev/rfcomm   216 0-255 serial
+// dbc_serial           /dev/ttyDBC   241       0 serial
+// dbc_serial           /dev/ttyDBC   242       0 serial
+// ttyprintk            /dev/ttyprintk   5       3 console
+// max310x              /dev/ttyMAX   204 209-224 serial
+// serial               /dev/ttyS       4 64-111 serial
+// pty_slave            /dev/pts      136 0-1048575 pty:slave
+// pty_master           /dev/ptm      128 0-1048575 pt
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+struct TtyDriver {
+    name: String,
+    major: i32,
+    minor_first: i32,
+    minor_last: i32,
+    is_devfs: bool,
+}
+
+async fn read_tty_drivers<R: AsyncReadExt + Unpin>(
+    reader: smol::io::BufReader<R>,
+) -> io::Result<Vec<TtyDriver>> {
+    lazy_static! {
+        static ref RECORD_RE: Regex =
+            Regex::new(r"^[^ ]+ +/dev/([^ ]+) +(\d+) +(\d+)(-(\d+))?").unwrap();
+    }
+
+    let mut records = Vec::new();
+    let mut lines = reader.lines();
+    while let Some(line) = lines.next().await {
+        let line = line?;
+        if let Some(caps) = RECORD_RE.captures(&line) {
+            let mut name = caps.get(1).unwrap().as_str().to_string();
+            let is_devfs = name.ends_with("%d");
+            if is_devfs {
+                name.truncate(name.len() - "%d".len());
+            }
+            let major = caps.get(2).unwrap().as_str().parse::<i32>().unwrap();
+            let minor_first = caps.get(3).unwrap().as_str().parse::<i32>().unwrap();
+            let minor_last = caps
+                .get(5)
+                .map_or(minor_first, |m| m.as_str().parse::<i32>().unwrap());
+            let record = TtyDriver {
+                name,
+                major,
+                minor_first,
+                minor_last,
+                is_devfs,
+            };
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
 mod test {
     use super::*;
     use smol::io::{self, AsyncBufReadExt};
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn test_read_tty_drivers() {
+        let mut bytes = b"/dev/tty             /dev/tty        5       0 system:/dev/tty\n\
+            serial               /dev/ttyS       4 64-111 serial\n\
+            for_test             /dev/tty/%d     4 1-63 console\n"
+            .to_vec();
+        let cursor = smol::io::Cursor::new(&mut bytes);
+        let reader = smol::io::BufReader::new(cursor);
+        let wanted = vec![
+            TtyDriver {
+                name: String::from("tty"),
+                major: 5,
+                minor_first: 0,
+                minor_last: 0,
+                is_devfs: false,
+            },
+            TtyDriver {
+                name: String::from("ttyS"),
+                major: 4,
+                minor_first: 64,
+                minor_last: 111,
+                is_devfs: false,
+            },
+            TtyDriver {
+                name: String::from("tty/"),
+                major: 4,
+                minor_first: 1,
+                minor_last: 63,
+                is_devfs: true,
+            },
+        ];
+        smol::block_on(async {
+            let records = read_tty_drivers(reader).await.unwrap();
+            assert_eq!(records, wanted);
+        });
+    }
 
     #[test]
     fn test_column_width_for_u32() {
@@ -907,7 +1010,7 @@ mod test {
             btime: BTIME,
             uptime: std::time::Duration::from_secs(0),
             now: Local::now(),
-            ram_total: 1,
+            ram_total: 1024,
         };
         let mut records = Vec::new();
         for pid in forest.roots.iter() {
