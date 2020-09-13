@@ -18,6 +18,7 @@ use std::process;
 use std::str;
 use std::sync::Mutex;
 
+mod regex_util;
 mod proc;
 mod tty;
 mod user;

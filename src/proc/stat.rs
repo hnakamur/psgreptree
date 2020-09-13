@@ -1,3 +1,4 @@
+use crate::regex_util::CapturesAdapter;
 use regex::Regex;
 use smol::fs::File;
 use smol::io::BufReader;
@@ -29,40 +30,25 @@ pub async fn load_stat(pid: u32) -> Result<Stat> {
 async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<Stat> {
     lazy_static! {
         // https://elixir.bootlin.com/linux/latest/C/ident/do_task_stat
-        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<cutime>-?\d+) (?P<cstime>-?\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
+        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<cutime>-?\d+) (?P<cstime>-?\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+)").unwrap();
     }
 
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).await?;
     let text = std::str::from_utf8(&buf).unwrap();
-    let cap = STAT_RE.captures(text).unwrap();
-    let comm = cap.name("comm").unwrap().as_str().to_string();
-    let state = cap.name("state").unwrap().as_str().to_string();
-    let ppid = cap.name("ppid").unwrap().as_str().parse::<u32>().unwrap();
-    let pgrp = cap.name("pgrp").unwrap().as_str().parse::<u32>().unwrap();
-    let session = cap
-        .name("session")
-        .unwrap()
-        .as_str()
-        .parse::<u32>()
-        .unwrap();
-    let tty_nr = cap.name("tty_nr").unwrap().as_str().parse::<i32>().unwrap();
-    let tpgid = cap.name("tpgid").unwrap().as_str().parse::<i32>().unwrap();
-    let utime = cap.name("utime").unwrap().as_str().parse::<u64>().unwrap();
-    let stime = cap.name("stime").unwrap().as_str().parse::<u64>().unwrap();
-    let nice = cap.name("nice").unwrap().as_str().parse::<i64>().unwrap();
-    let num_threads = cap
-        .name("num_threads")
-        .unwrap()
-        .as_str()
-        .parse::<i32>()
-        .unwrap();
-    let start_time = cap
-        .name("starttime")
-        .unwrap()
-        .as_str()
-        .parse::<u64>()
-        .unwrap();
+    let cap = CapturesAdapter::new(STAT_RE.captures(text).unwrap());
+    let comm = cap.string_by_name("comm");
+    let state = cap.string_by_name("state");
+    let ppid = cap.int_by_name::<u32>("ppid").unwrap();
+    let pgrp = cap.int_by_name::<u32>("pgrp").unwrap();
+    let session = cap.int_by_name::<u32>("session").unwrap();
+    let tty_nr = cap.int_by_name::<i32>("tty_nr").unwrap();
+    let tpgid = cap.int_by_name::<i32>("tpgid").unwrap();
+    let utime = cap.int_by_name::<u64>("utime").unwrap();
+    let stime = cap.int_by_name::<u64>("stime").unwrap();
+    let nice = cap.int_by_name::<i64>("nice").unwrap();
+    let num_threads = cap.int_by_name::<i32>("num_threads").unwrap();
+    let start_time = cap.int_by_name::<u64>("starttime").unwrap();
     Ok(Stat {
         comm,
         state,
