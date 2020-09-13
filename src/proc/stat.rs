@@ -70,10 +70,8 @@ mod test {
 
     #[test]
     fn test_read_stat() {
-        let mut bytes = b"12 (migration/0) S 2 0 0 0 -1 69238848 0 0 0 0 1 0 0 0 -100 0 1 0 15 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 99 1 0 0 0 0 0 0 0 0 0 0 0"
-            .to_vec();
-        let cursor = smol::io::Cursor::new(&mut bytes);
-        let reader = BufReader::new(cursor);
+        let input = b"12 (migration/0) S 2 0 0 0 -1 69238848 0 0 0 0 1 0 0 0 -100 0 1 0 15 0 0 18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 0 99 1 0 0 0 0 0 0 0 0 0 0 0";
+        let reader = BufReader::new(&input[..]);
         let wanted = Stat {
             comm: String::from("migration/0"),
             state: String::from("S"),
