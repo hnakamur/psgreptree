@@ -2,7 +2,7 @@ use crate::regex_util::CapturesAdapter;
 use regex::Regex;
 use smol::fs::File;
 use smol::io::BufReader;
-use smol::prelude::AsyncReadExt;
+use smol::prelude::{AsyncBufReadExt, AsyncReadExt, StreamExt};
 use std::io::Result;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -63,6 +63,26 @@ async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<
         num_threads,
         start_time,
     })
+}
+
+pub async fn get_btime() -> Result<u64> {
+    const PATH: &str = "/proc/stat";
+    let file = File::open(PATH).await?;
+    let reader = smol::io::BufReader::new(file);
+    lazy_static! {
+        static ref BTIME_RE: Regex = Regex::new(r"^btime[\t ]+(\d+)").unwrap();
+    }
+
+    let mut lines = reader.lines();
+    let mut btime = 0u64;
+    while let Some(line) = lines.next().await {
+        let line = line.unwrap();
+        if let Some(caps) = BTIME_RE.captures(&line) {
+            let caps = CapturesAdapter::new(caps);
+            btime = caps.int_by_index::<u64>(1).unwrap();
+        }
+    }
+    Ok(btime)
 }
 
 mod test {

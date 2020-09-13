@@ -8,8 +8,7 @@ use futures_lite::*;
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
-use smol::fs::{read_dir, self, DirEntry, File};
-use smol::io::AsyncBufReadExt;
+use smol::fs::{self, read_dir, DirEntry};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
@@ -18,8 +17,8 @@ use std::process;
 use std::str;
 use std::sync::Mutex;
 
-mod regex_util;
 mod proc;
+mod regex_util;
 mod tty;
 mod user;
 
@@ -59,7 +58,8 @@ const TIME_COLUMN_WIDTH: usize = 6;
 impl Process {
     fn format_uname_or_uid(&self, uid: Uid) -> String {
         lazy_static! {
-            static ref UNAME_CACHE: Mutex<user::UserNameCache> = Mutex::new(user::UserNameCache::new());
+            static ref UNAME_CACHE: Mutex<user::UserNameCache> =
+                Mutex::new(user::UserNameCache::new());
         }
         match UNAME_CACHE.lock().unwrap().get(uid) {
             Ok(Some(uname)) => {
@@ -145,7 +145,6 @@ impl Process {
         format!("{:3}:{:02}", u / 60, u % 60)
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct ProcessForestNode {
@@ -341,7 +340,7 @@ fn main() {
         let wanted_procs = get_matched_and_descendants(&procs, &matched_pids)
             .await
             .unwrap();
-        let btime = get_btime().await.unwrap();
+        let btime = proc::stat::get_btime().await.unwrap();
         let now = Local::now();
         let proc_forest = build_process_forest(wanted_procs, btime, now);
         print!("{}", proc_forest);
@@ -519,25 +518,6 @@ fn build_process_forest(
         now,
         ram_total: sysinfo.ram_total(),
     }
-}
-
-async fn get_btime() -> Result<u64> {
-    const PATH: &str = "/proc/stat";
-    let file = File::open(PATH).await?;
-    let reader = smol::io::BufReader::new(file);
-    lazy_static! {
-        static ref BTIME_RE: Regex = Regex::new(r"^btime[\t ]+(\d+)").unwrap();
-    }
-
-    let mut lines = reader.lines();
-    let mut btime = 0u64;
-    while let Some(line) = lines.next().await {
-        let line = line.unwrap();
-        if let Some(caps) = BTIME_RE.captures(&line) {
-            btime = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
-        }
-    }
-    Ok(btime)
 }
 
 fn column_width_for_u32(n: u32) -> usize {
