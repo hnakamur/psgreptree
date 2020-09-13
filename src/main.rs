@@ -146,13 +146,6 @@ impl Process {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ProcStatus {
-    euid: Uid,
-    vm_size: u64,
-    vm_lock: u64,
-    vm_rss: u64,
-}
 
 #[derive(Debug, Clone)]
 struct ProcessForestNode {
@@ -414,55 +407,6 @@ async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
     Ok(pids)
 }
 
-async fn read_status(pid: u32) -> Result<ProcStatus> {
-    let path = format!("/proc/{}/status", pid);
-    let file = File::open(path).await?;
-    let reader = smol::io::BufReader::new(file);
-    lazy_static! {
-        static ref KEY_VAL_RE: Regex = Regex::new(r"^(.*?):[\t ]*(.+)").unwrap();
-        static ref EUID_RE: Regex = Regex::new(r"^\d+\t(\d+)").unwrap();
-        static ref KB_RE: Regex = Regex::new(r"^(\d+)").unwrap();
-    }
-
-    let mut euid: Uid = Uid::from_raw(0);
-    let mut vm_size = 0u64;
-    let mut vm_lock = 0u64;
-    let mut vm_rss = 0u64;
-    let mut lines = reader.lines();
-    while let Some(line) = lines.next().await {
-        let line = line.unwrap();
-        if let Some(caps) = KEY_VAL_RE.captures(&line) {
-            let key = caps.get(1).unwrap().as_str();
-            let value = caps.get(2).unwrap().as_str();
-            match key {
-                "Uid" => {
-                    let caps = EUID_RE.captures(value).unwrap();
-                    euid = Uid::from_raw(caps.get(1).unwrap().as_str().parse::<u32>().unwrap());
-                }
-                "VmSize" => {
-                    let caps = KB_RE.captures(value).unwrap();
-                    vm_size = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
-                }
-                "VmLck" => {
-                    let caps = KB_RE.captures(value).unwrap();
-                    vm_lock = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
-                }
-                "VmRSS" => {
-                    let caps = KB_RE.captures(value).unwrap();
-                    vm_rss = caps.get(1).unwrap().as_str().parse::<u64>().unwrap();
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(ProcStatus {
-        euid,
-        vm_size,
-        vm_lock,
-        vm_rss,
-    })
-}
-
 async fn read_cmdline(pid: u32) -> Result<String> {
     let path = format!("/proc/{}/cmdline", pid);
     let data = async_fs::read(path).await?;
@@ -523,7 +467,7 @@ async fn get_matched_and_descendants(
     for (pid, wanted) in marks.iter() {
         if *wanted {
             let mut proc = procs.get(pid).unwrap().clone();
-            let status = read_status(*pid).await.expect("read_status");
+            let status = proc::status::load_status(*pid).await.expect("read_status");
             proc.euid = status.euid;
             proc.vm_size = status.vm_size;
             proc.vm_lock = status.vm_lock;
