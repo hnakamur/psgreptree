@@ -18,7 +18,7 @@ impl<'t> CapturesAdapter<'t> {
     {
         let s = self.str_by_index(i);
         s.parse::<F>()
-            .with_context(|| format!("cannot parse match indexed {} ({})", i, s))
+            .with_context(|| format!("cannot parse match indexed {} (value: {})", i, s))
     }
 
     pub fn str_by_index(&self, i: usize) -> &str {
@@ -34,7 +34,7 @@ impl<'t> CapturesAdapter<'t> {
     {
         let s = self.str_by_name(name);
         s.parse::<F>()
-            .with_context(|| format!("cannot parse match named {} ({})", name, s))
+            .with_context(|| format!("cannot parse match named {} (value: {})", name, s))
     }
 
     pub fn string_by_name(&self, name: &str) -> String {
