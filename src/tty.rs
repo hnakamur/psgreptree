@@ -17,19 +17,22 @@ struct TtyDriver {
 }
 
 pub async fn format_tty(tty_nr: i32, pid: u32) -> Result<String> {
+    lazy_static! {
+        static ref DRIVERS: Vec<TtyDriver> =
+            smol::block_on(async { load_tty_drivers().await.expect("load tty drivers") });
+    }
     if tty_nr == 0 {
         Ok(String::from("?"))
     } else {
         let major = nix::sys::stat::major(tty_nr as u64);
         let minor = nix::sys::stat::minor(tty_nr as u64);
-        let drivers = load_tty_drivers().await?;
-        let buf = if let Some(buf) = driver_name(&drivers, major, minor).await {
+        let buf = if let Some(buf) = driver_name(&DRIVERS, major, minor).await {
             buf
-        } else if let Some(buf) = link_name( major, minor, pid, "fd/2").await {
+        } else if let Some(buf) = link_name(major, minor, pid, "fd/2").await {
             buf
-        } else if let Some(buf) = guess_name( major, minor).await {
+        } else if let Some(buf) = guess_name(major, minor).await {
             buf
-        } else if let Some(buf) = link_name( major, minor, pid, "fd/255").await {
+        } else if let Some(buf) = link_name(major, minor, pid, "fd/255").await {
             buf
         } else {
             return Ok(String::from("?"));
@@ -237,7 +240,10 @@ async fn guess_name(major: u64, minor: u64) -> Option<PathBuf> {
         172 => format!("/dev/ttyMX{}", minor),
         174 => format!("/dev/ttySI{}", minor),
         188 => format!("/dev/ttyUSB{}", minor), // 9-char
-        204 => format!("/dev/tty{}", LOW_DENSITY_NAMES[usize::try_from(minor).unwrap()]),
+        204 => format!(
+            "/dev/tty{}",
+            LOW_DENSITY_NAMES[usize::try_from(minor).unwrap()]
+        ),
         208 => format!("/dev/ttyU{}", minor),
         216 => format!("/dev/ttyUB{}", minor), // "/dev/rfcomm%d" now?
         224 => format!("/dev/ttyY{}", minor),
