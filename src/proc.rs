@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, TimeZone};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
@@ -9,7 +10,6 @@ use smol::fs::{read_dir, DirEntry};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
-use std::io::Result;
 use std::process;
 use std::str;
 use std::sync::Mutex;
@@ -366,7 +366,7 @@ async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
                 };
                 pids.insert(pid, proc);
             }
-            (Err(e), _) => return Err(e),
+            (Err(e), _) => return Err(e).with_context(|| format!("load stat for pid={}", pid)),
             (_, Err(e)) => return Err(e),
         };
     }
