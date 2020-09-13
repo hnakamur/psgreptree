@@ -8,7 +8,7 @@ use futures_lite::*;
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
-use smol::fs::{self, read_dir, DirEntry};
+use smol::fs::{read_dir, DirEntry};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
@@ -147,12 +147,6 @@ impl Process {
 }
 
 #[derive(Debug, Clone)]
-struct ProcessForestNode {
-    process: Process,
-    child_pids: Vec<u32>,
-}
-
-#[derive(Debug, Clone)]
 struct ProcessForest {
     roots: BTreeSet<u32>,
     nodes: BTreeMap<u32, ProcessForestNode>,
@@ -163,57 +157,10 @@ struct ProcessForest {
     ram_total: u64,
 }
 
-impl ProcessForest {
-    fn print_forest_helper(
-        &self,
-        pid: u32,
-        last_child: Vec<bool>,
-        records: &mut Vec<OutputLineRecord>,
-    ) {
-        let node = self.nodes.get(&pid).unwrap();
-        records.push(OutputLineRecord {
-            uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
-            pid: format!("{}", pid),
-            cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
-            mem_percent: node.process.format_mem_percent(self.ram_total),
-            vsz: format!("{}", node.process.vm_size),
-            rss: format!("{}", node.process.vm_rss),
-            tty: smol::block_on(async {
-                tty::format_tty(node.process.tty_nr, node.process.pid)
-                    .await
-                    .unwrap()
-            }),
-            stat: format!(
-                "{:stat_w$}",
-                node.process.format_stat(),
-                stat_w = STAT_COLUMN_WIDTH
-            ),
-            start_time: format!(
-                "{:start_w$}",
-                node.process
-                    .format_start_time(self.herz, self.btime, self.now,),
-                start_w = START_COLUMN_WIDTH
-            ),
-            time: format!(
-                "{:>time_w$}",
-                node.process.format_time(self.herz),
-                time_w = TIME_COLUMN_WIDTH
-            ),
-            cmdline: format!(
-                "{}{}",
-                last_child_to_indent(&last_child),
-                node.process.cmdline
-            ),
-        });
-        let mut i = 0;
-        while i < node.child_pids.len() {
-            let child_pid = node.child_pids[i];
-            let mut last_child2 = last_child.clone();
-            last_child2.push(i == node.child_pids.len() - 1);
-            self.print_forest_helper(child_pid, last_child2, records);
-            i += 1;
-        }
-    }
+#[derive(Debug, Clone)]
+struct ProcessForestNode {
+    process: Process,
+    child_pids: Vec<u32>,
 }
 
 const COMMAND_LABEL: &str = "COMMAND";
@@ -224,7 +171,7 @@ impl fmt::Display for ProcessForest {
         for pid in self.roots.iter() {
             self.print_forest_helper(*pid, vec![], &mut records);
         }
-        let pid_w = smol::block_on(async { get_pid_digits().await });
+        let pid_w = smol::block_on(async { proc::get_pid_digits().await });
         writeln!(
             f,
             "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:tty_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
@@ -289,19 +236,6 @@ impl fmt::Display for ProcessForest {
     }
 }
 
-async fn get_pid_digits() -> usize {
-    const DEFAULT_WIDTH: usize = 5;
-    fs::read("/proc/sys/kernel/pid_max")
-        .await
-        .map_or(DEFAULT_WIDTH, |data| {
-            str::from_utf8(&data).map_or(DEFAULT_WIDTH, |text| {
-                text.trim()
-                    .parse::<u32>()
-                    .map_or(DEFAULT_WIDTH, |max_pid| column_width_for_u32(max_pid - 1))
-            })
-        })
-}
-
 struct OutputLineRecord {
     uname_or_uid: String,
     pid: String,
@@ -314,6 +248,59 @@ struct OutputLineRecord {
     start_time: String,
     time: String,
     cmdline: String,
+}
+
+impl ProcessForest {
+    fn print_forest_helper(
+        &self,
+        pid: u32,
+        last_child: Vec<bool>,
+        records: &mut Vec<OutputLineRecord>,
+    ) {
+        let node = self.nodes.get(&pid).unwrap();
+        records.push(OutputLineRecord {
+            uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
+            pid: format!("{}", pid),
+            cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
+            mem_percent: node.process.format_mem_percent(self.ram_total),
+            vsz: format!("{}", node.process.vm_size),
+            rss: format!("{}", node.process.vm_rss),
+            tty: smol::block_on(async {
+                tty::format_tty(node.process.tty_nr, node.process.pid)
+                    .await
+                    .unwrap()
+            }),
+            stat: format!(
+                "{:stat_w$}",
+                node.process.format_stat(),
+                stat_w = STAT_COLUMN_WIDTH
+            ),
+            start_time: format!(
+                "{:start_w$}",
+                node.process
+                    .format_start_time(self.herz, self.btime, self.now,),
+                start_w = START_COLUMN_WIDTH
+            ),
+            time: format!(
+                "{:>time_w$}",
+                node.process.format_time(self.herz),
+                time_w = TIME_COLUMN_WIDTH
+            ),
+            cmdline: format!(
+                "{}{}",
+                last_child_to_indent(&last_child),
+                node.process.cmdline
+            ),
+        });
+        let mut i = 0;
+        while i < node.child_pids.len() {
+            let child_pid = node.child_pids[i];
+            let mut last_child2 = last_child.clone();
+            last_child2.push(i == node.child_pids.len() - 1);
+            self.print_forest_helper(child_pid, last_child2, records);
+            i += 1;
+        }
+    }
 }
 
 fn main() {
@@ -520,16 +507,6 @@ fn build_process_forest(
     }
 }
 
-fn column_width_for_u32(n: u32) -> usize {
-    let mut width = 1;
-    let mut n = n / 10;
-    while n > 0 {
-        width += 1;
-        n /= 10;
-    }
-    width
-}
-
 fn last_child_to_indent(last_child: &[bool]) -> String {
     let mut indent = String::new();
     let mut i = 0;
@@ -548,18 +525,6 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
 
 mod test {
     use super::*;
-    use smol::io::{self, AsyncBufReadExt};
-    use std::collections::{BTreeMap, BTreeSet};
-
-    #[test]
-    fn test_column_width_for_u32() {
-        assert_eq!(column_width_for_u32(0), 1);
-        assert_eq!(column_width_for_u32(1), 1);
-        assert_eq!(column_width_for_u32(9), 1);
-        assert_eq!(column_width_for_u32(10), 2);
-        assert_eq!(column_width_for_u32(99), 2);
-        assert_eq!(column_width_for_u32(100), 3);
-    }
 
     #[test]
     fn test_process_forest_fmt() {
