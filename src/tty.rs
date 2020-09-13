@@ -103,7 +103,6 @@ async fn driver_name(drivers: &[TtyDriver], major: u64, minor: u64) -> Option<Pa
                 }
             }
             Err(_) => {
-                // println!("cannot get metadata for {}: {}", buf, e);
                 let buf = format!("/dev/{}/{}", driver.name, minor); // like "/dev/pts/255"
                 match fs::metadata(&buf).await {
                     Ok(m) => {
@@ -114,7 +113,6 @@ async fn driver_name(drivers: &[TtyDriver], major: u64, minor: u64) -> Option<Pa
                         }
                     }
                     Err(_) => {
-                        // println!("cannot get metadata for {}: {}", buf, _e);
                         let buf = format!("/dev/{}", driver.name); // like "/dev/ttyZZ255"
                         match fs::metadata(&buf).await {
                             Ok(m) => {
@@ -124,30 +122,18 @@ async fn driver_name(drivers: &[TtyDriver], major: u64, minor: u64) -> Option<Pa
                                     None
                                 }
                             }
-                            Err(_) => {
-                                // println!("cannot get metadata for {}: {}", buf, e);
-                                None
-                            }
+                            Err(_) => None,
                         }
                     }
                 }
             }
         }
     } else {
-        // println!("driver not found");
         None
     }
 }
 
 fn does_rdev_match(m: std::fs::Metadata, major: u64, minor: u64) -> bool {
-    // println!(
-    //     "does_rdev_match st_rdev={}, got_major={}, major={}, got_minor={}, minor={}",
-    //     m.st_rdev(),
-    //     nix::sys::stat::major(m.st_rdev()),
-    //     major,
-    //     nix::sys::stat::minor(m.st_rdev()),
-    //     minor
-    // );
     nix::sys::stat::major(m.st_rdev()) == major && nix::sys::stat::minor(m.st_rdev()) == minor
 }
 
@@ -266,15 +252,6 @@ async fn guess_name(major: u64, minor: u64) -> Option<PathBuf> {
 
 mod test {
     use super::*;
-
-    #[test]
-    fn test_driver_name() {
-        smol::block_on(async {
-            let drivers = load_tty_drivers().await.unwrap();
-            let name = driver_name(&drivers, 4, 1).await.unwrap();
-            println!("name={}", name.to_str().unwrap());
-        });
-    }
 
     #[test]
     fn test_read_tty_drivers() {
