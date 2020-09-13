@@ -357,7 +357,7 @@ async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
     let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
-        match future::zip(proc::stat::load_stat(pid), read_cmdline(pid)).await {
+        match future::zip(proc::stat::load_stat(pid), proc::cmdline::read_cmdline(pid)).await {
             (Ok(stat), Ok(mut cmdline)) => {
                 if stat.state == "Z" {
                     cmdline = format!("[{}] <defunct>", &stat.comm);
@@ -391,14 +391,6 @@ async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
         };
     }
     Ok(pids)
-}
-
-async fn read_cmdline(pid: u32) -> Result<String> {
-    let path = format!("/proc/{}/cmdline", pid);
-    let data = async_fs::read(path).await?;
-    let raw_cmdline = String::from_utf8(data).unwrap();
-    let cmdline = raw_cmdline.trim_end_matches('\0').replace("\0", " ");
-    Ok(cmdline)
 }
 
 fn match_cmdline(procs: &BTreeMap<u32, Process>, pattern: &str) -> BTreeSet<u32> {
@@ -523,6 +515,7 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
     indent
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

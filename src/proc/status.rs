@@ -67,6 +67,7 @@ async fn read_status<R: AsyncReadExt + Unpin>(reader: BufReader<R>) -> Result<St
     })
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

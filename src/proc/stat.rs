@@ -85,6 +85,7 @@ pub async fn get_btime() -> Result<u64> {
     Ok(btime)
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

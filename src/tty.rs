@@ -250,6 +250,7 @@ async fn guess_name(major: u64, minor: u64) -> Option<PathBuf> {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 

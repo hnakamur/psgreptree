@@ -1,3 +1,4 @@
+pub mod cmdline;
 pub mod stat;
 pub mod status;
 
@@ -27,6 +28,7 @@ fn column_width_for_u32(n: u32) -> usize {
     width
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
 
