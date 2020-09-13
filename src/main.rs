@@ -1,7 +1,6 @@
 #[macro_use]
 extern crate lazy_static;
 
-use async_fs::{read_dir, DirEntry, File};
 use chrono::{DateTime, Duration, Local, TimeZone};
 use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
@@ -9,15 +8,17 @@ use futures_lite::*;
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
+use smol::fs::{read_dir, self, DirEntry, File};
 use smol::io::AsyncBufReadExt;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
-use std::io;
+use std::io::Result;
 use std::process;
 use std::str;
 use std::sync::Mutex;
 
+mod proc;
 mod tty;
 mod user;
 
@@ -142,22 +143,6 @@ impl Process {
 
         format!("{:3}:{:02}", u / 60, u % 60)
     }
-}
-
-#[derive(Debug, Clone)]
-struct ProcStat {
-    comm: String,
-    state: String,
-    ppid: u32,
-    pgrp: u32,
-    session: u32,
-    tty_nr: i32,
-    tpgid: i32,
-    utime: u64,
-    stime: u64,
-    nice: i64,
-    num_threads: i32,
-    start_time: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -313,7 +298,7 @@ impl fmt::Display for ProcessForest {
 
 async fn get_pid_digits() -> usize {
     const DEFAULT_WIDTH: usize = 5;
-    async_fs::read("/proc/sys/kernel/pid_max")
+    fs::read("/proc/sys/kernel/pid_max")
         .await
         .map_or(DEFAULT_WIDTH, |data| {
             str::from_utf8(&data).map_or(DEFAULT_WIDTH, |text| {
@@ -323,7 +308,6 @@ async fn get_pid_digits() -> usize {
             })
         })
 }
-
 
 struct OutputLineRecord {
     uname_or_uid: String,
@@ -370,7 +354,7 @@ fn main() {
     });
 }
 
-async fn all_pids() -> io::Result<Vec<u32>> {
+async fn all_pids() -> Result<Vec<u32>> {
     let mut pids = Vec::new();
     let mut entries = read_dir("/proc").await?;
     while let Some(res) = entries.next().await {
@@ -389,11 +373,11 @@ fn is_pid_entry(entry: &DirEntry) -> bool {
     PID_RE.is_match(entry.file_name().to_str().unwrap())
 }
 
-async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
+async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
     let mut pids = BTreeMap::new();
     let mut s = stream::iter(all_pids);
     while let Some(pid) = s.next().await {
-        match future::zip(read_stat(pid), read_cmdline(pid)).await {
+        match future::zip(proc::stat::load_stat(pid), read_cmdline(pid)).await {
             (Ok(stat), Ok(mut cmdline)) => {
                 if stat.state == "Z" {
                     cmdline = format!("[{}] <defunct>", &stat.comm);
@@ -429,60 +413,7 @@ async fn all_procs(all_pids: Vec<u32>) -> io::Result<BTreeMap<u32, Process>> {
     Ok(pids)
 }
 
-async fn read_stat(pid: u32) -> io::Result<ProcStat> {
-    lazy_static! {
-        // https://elixir.bootlin.com/linux/latest/C/ident/do_task_stat
-        static ref STAT_RE: Regex = Regex::new(r"^(?P<pid>\d+) \((?P<comm>.+?)\) (?P<state>.) (?P<ppid>\d+) (?P<pgrp>\d+) (?P<session>\d+) (?P<tty_nr>\d+) (?P<tpgid>-?\d+) (?P<flags>-?\d+) (?P<minflt>\d+) (?P<cminflt>\d+) (?P<majflt>\d+) (?P<cmajflt>\d+) (?P<utime>\d+) (?P<stime>\d+) (?P<cutime>-?\d+) (?P<cstime>-?\d+) (?P<priority>-?\d+) (?P<nice>-?\d+) (?P<num_threads>-?\d+) (?P<itrealvalue>-?\d+) (?P<starttime>\d+) (?P<vsize>\d+) (?P<rss>\d+)").unwrap();
-    }
-
-    let path = format!("/proc/{}/stat", pid);
-    let data = async_fs::read(path).await?;
-    let text = str::from_utf8(&data).unwrap();
-    let cap = STAT_RE.captures(text).unwrap();
-    let comm = cap.name("comm").unwrap().as_str().to_string();
-    let state = cap.name("state").unwrap().as_str().to_string();
-    let ppid = cap.name("ppid").unwrap().as_str().parse::<u32>().unwrap();
-    let pgrp = cap.name("pgrp").unwrap().as_str().parse::<u32>().unwrap();
-    let session = cap
-        .name("session")
-        .unwrap()
-        .as_str()
-        .parse::<u32>()
-        .unwrap();
-    let tty_nr = cap.name("tty_nr").unwrap().as_str().parse::<i32>().unwrap();
-    let tpgid = cap.name("tpgid").unwrap().as_str().parse::<i32>().unwrap();
-    let utime = cap.name("utime").unwrap().as_str().parse::<u64>().unwrap();
-    let stime = cap.name("stime").unwrap().as_str().parse::<u64>().unwrap();
-    let nice = cap.name("nice").unwrap().as_str().parse::<i64>().unwrap();
-    let num_threads = cap
-        .name("num_threads")
-        .unwrap()
-        .as_str()
-        .parse::<i32>()
-        .unwrap();
-    let start_time = cap
-        .name("starttime")
-        .unwrap()
-        .as_str()
-        .parse::<u64>()
-        .unwrap();
-    Ok(ProcStat {
-        comm,
-        state,
-        ppid,
-        pgrp,
-        session,
-        tty_nr,
-        tpgid,
-        utime,
-        stime,
-        nice,
-        num_threads,
-        start_time,
-    })
-}
-
-async fn read_status(pid: u32) -> io::Result<ProcStatus> {
+async fn read_status(pid: u32) -> Result<ProcStatus> {
     let path = format!("/proc/{}/status", pid);
     let file = File::open(path).await?;
     let reader = smol::io::BufReader::new(file);
@@ -531,7 +462,7 @@ async fn read_status(pid: u32) -> io::Result<ProcStatus> {
     })
 }
 
-async fn read_cmdline(pid: u32) -> io::Result<String> {
+async fn read_cmdline(pid: u32) -> Result<String> {
     let path = format!("/proc/{}/cmdline", pid);
     let data = async_fs::read(path).await?;
     let raw_cmdline = String::from_utf8(data).unwrap();
@@ -554,7 +485,7 @@ fn match_cmdline(procs: &BTreeMap<u32, Process>, pattern: &str) -> BTreeSet<u32>
 async fn get_matched_and_descendants(
     procs: &BTreeMap<u32, Process>,
     matched_pids: &BTreeSet<u32>,
-) -> io::Result<BTreeMap<u32, Process>> {
+) -> Result<BTreeMap<u32, Process>> {
     let mut marks = HashMap::new();
     for pid in matched_pids.iter() {
         marks.insert(*pid, true);
@@ -645,7 +576,7 @@ fn build_process_forest(
     }
 }
 
-async fn get_btime() -> io::Result<u64> {
+async fn get_btime() -> Result<u64> {
     const PATH: &str = "/proc/stat";
     let file = File::open(PATH).await?;
     let reader = smol::io::BufReader::new(file);
