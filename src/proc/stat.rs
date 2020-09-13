@@ -1,9 +1,9 @@
 use crate::regex_util::CapturesAdapter;
+use anyhow::{Context, Result};
 use regex::Regex;
 use smol::fs::File;
 use smol::io::BufReader;
 use smol::prelude::{AsyncBufReadExt, AsyncReadExt, StreamExt};
-use std::io::Result;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Stat {
@@ -23,8 +23,12 @@ pub struct Stat {
 
 pub async fn load_stat(pid: u32) -> Result<Stat> {
     let path = format!("/proc/{}/stat", pid);
-    let file = File::open(path).await?;
-    read_stat(BufReader::new(file)).await
+    let file = File::open(&path)
+        .await
+        .with_context(|| format!("cannot open {}", &path))?;
+    read_stat(BufReader::new(file))
+        .await
+        .with_context(|| format!("read error for {}", &path))
 }
 
 async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<Stat> {
@@ -34,21 +38,28 @@ async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<
     }
 
     let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await?;
-    let text = std::str::from_utf8(&buf).unwrap();
-    let cap = CapturesAdapter::new(STAT_RE.captures(text).unwrap());
-    let comm = cap.string_by_name("comm");
-    let state = cap.string_by_name("state");
-    let ppid = cap.int_by_name::<u32>("ppid").unwrap();
-    let pgrp = cap.int_by_name::<u32>("pgrp").unwrap();
-    let session = cap.int_by_name::<u32>("session").unwrap();
-    let tty_nr = cap.int_by_name::<i32>("tty_nr").unwrap();
-    let tpgid = cap.int_by_name::<i32>("tpgid").unwrap();
-    let utime = cap.int_by_name::<u64>("utime").unwrap();
-    let stime = cap.int_by_name::<u64>("stime").unwrap();
-    let nice = cap.int_by_name::<i64>("nice").unwrap();
-    let num_threads = cap.int_by_name::<i32>("num_threads").unwrap();
-    let start_time = cap.int_by_name::<u64>("starttime").unwrap();
+    reader
+        .read_to_end(&mut buf)
+        .await
+        .with_context(|| "cannot read /proc/[pid]/stat file")?;
+    let text = std::str::from_utf8(&buf)
+        .with_context(|| "invalid utf8 character in /proc/[pid]/stat file")?;
+    let caps = STAT_RE
+        .captures(text)
+        .with_context(|| "regex match failed")?;
+    let caps = CapturesAdapter::new(caps);
+    let comm = caps.string_by_name("comm");
+    let state = caps.string_by_name("state");
+    let ppid = caps.int_by_name::<u32>("ppid")?;
+    let pgrp = caps.int_by_name::<u32>("pgrp")?;
+    let session = caps.int_by_name::<u32>("session")?;
+    let tty_nr = caps.int_by_name::<i32>("tty_nr")?;
+    let tpgid = caps.int_by_name::<i32>("tpgid")?;
+    let utime = caps.int_by_name::<u64>("utime")?;
+    let stime = caps.int_by_name::<u64>("stime")?;
+    let nice = caps.int_by_name::<i64>("nice")?;
+    let num_threads = caps.int_by_name::<i32>("num_threads")?;
+    let start_time = caps.int_by_name::<u64>("starttime")?;
     Ok(Stat {
         comm,
         state,
@@ -76,10 +87,9 @@ pub async fn get_btime() -> Result<u64> {
     let mut lines = reader.lines();
     let mut btime = 0u64;
     while let Some(line) = lines.next().await {
-        let line = line.unwrap();
-        if let Some(caps) = BTIME_RE.captures(&line) {
+        if let Some(caps) = BTIME_RE.captures(&line?) {
             let caps = CapturesAdapter::new(caps);
-            btime = caps.int_by_index::<u64>(1).unwrap();
+            btime = caps.int_by_index::<u64>(1)?;
         }
     }
     Ok(btime)

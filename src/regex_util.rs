@@ -1,26 +1,50 @@
+use anyhow::{Context, Result};
+use regex::Captures;
+use std::error::Error;
 use std::str::FromStr;
+
 pub struct CapturesAdapter<'t> {
-    caps: regex::Captures<'t>,
+    caps: Captures<'t>,
 }
 
 impl<'t> CapturesAdapter<'t> {
-    pub fn new(caps: regex::Captures<'t>) -> Self {
+    pub fn new(caps: Captures<'t>) -> Self {
         Self { caps }
     }
 
-    pub fn int_by_index<F: FromStr>(&self, i: usize) -> Result<F, <F as FromStr>::Err> {
-        self.caps.get(i).unwrap().as_str().parse::<F>()
+    pub fn int_by_index<F: FromStr>(&self, i: usize) -> Result<F>
+    where
+        <F as FromStr>::Err: Error + Send + Sync + 'static,
+    {
+        let s = self.str_by_index(i);
+        s.parse::<F>()
+            .with_context(|| format!("cannot parse match indexed {} ({})", i, s))
     }
 
     pub fn str_by_index(&self, i: usize) -> &str {
-        self.caps.get(i).unwrap().as_str()
+        match self.caps.get(i) {
+            Some(m) => m.as_str(),
+            None => panic!(format!("regex match index {} is out of bounds", i)),
+        }
     }
 
-    pub fn int_by_name<F: FromStr>(&self, name: &str) -> Result<F, <F as FromStr>::Err> {
-        self.caps.name(name).unwrap().as_str().parse::<F>()
+    pub fn int_by_name<F: FromStr>(&self, name: &str) -> Result<F>
+    where
+        <F as FromStr>::Err: Error + Send + Sync + 'static,
+    {
+        let s = self.str_by_name(name);
+        s.parse::<F>()
+            .with_context(|| format!("cannot parse match named {} ({})", name, s))
     }
 
     pub fn string_by_name(&self, name: &str) -> String {
-        self.caps.name(name).unwrap().as_str().to_string()
+        self.str_by_name(name).to_string()
+    }
+
+    pub fn str_by_name(&self, name: &str) -> &str {
+        match self.caps.name(name) {
+            Some(m) => m.as_str(),
+            None => panic!(format!("regex match name {} not found in captures", name)),
+        }
     }
 }
