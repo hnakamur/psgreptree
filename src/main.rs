@@ -7,7 +7,7 @@ use clap::{App, Arg};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
 use nix::sys::sysinfo;
-use nix::unistd::{sysconf, SysconfVar, Uid, User};
+use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
 use smol::io::AsyncBufReadExt;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -19,6 +19,7 @@ use std::str;
 use std::sync::Mutex;
 
 mod tty;
+mod user;
 
 #[derive(Debug, Clone)]
 struct Process {
@@ -56,7 +57,7 @@ const TIME_COLUMN_WIDTH: usize = 6;
 impl Process {
     fn format_uname_or_uid(&self, uid: Uid) -> String {
         lazy_static! {
-            static ref UNAME_CACHE: Mutex<UnameCache> = Mutex::new(UnameCache::new());
+            static ref UNAME_CACHE: Mutex<user::UserNameCache> = Mutex::new(user::UserNameCache::new());
         }
         match UNAME_CACHE.lock().unwrap().get(uid) {
             Ok(Some(uname)) => {
@@ -323,22 +324,6 @@ async fn get_pid_digits() -> usize {
         })
 }
 
-#[derive(Debug, Clone)]
-struct UnameCache(HashMap<Uid, Option<String>>);
-
-impl UnameCache {
-    fn new() -> UnameCache {
-        UnameCache(HashMap::new())
-    }
-
-    fn get(&mut self, uid: Uid) -> io::Result<Option<String>> {
-        Ok(self
-            .0
-            .entry(uid)
-            .or_insert_with(|| User::from_uid(uid).expect("user").map(|u| u.name))
-            .clone())
-    }
-}
 
 struct OutputLineRecord {
     uname_or_uid: String,
