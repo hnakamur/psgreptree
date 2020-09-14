@@ -78,12 +78,12 @@ async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<
 
 pub async fn get_btime() -> Result<u64> {
     const PATH: &str = "/proc/stat";
-    let file = File::open(PATH).await?;
-    let reader = smol::io::BufReader::new(file);
+    let file = File::open(PATH).await.with_context(|| format!("cannot open {}", PATH))?;
+    let reader = BufReader::new(file);
+
     lazy_static! {
         static ref BTIME_RE: Regex = Regex::new(r"^btime[\t ]+(\d+)").unwrap();
     }
-
     let mut lines = reader.lines();
     let mut btime = 0u64;
     while let Some(line) = lines.next().await {

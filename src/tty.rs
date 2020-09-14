@@ -1,9 +1,10 @@
+use crate::regex_util::CapturesAdapter;
+use anyhow::{Context, Result};
 use regex::Regex;
 use smol::fs::{self, File};
 use smol::io::BufReader;
 use smol::prelude::{AsyncBufReadExt, AsyncReadExt, StreamExt};
 use std::convert::TryFrom;
-use std::io::Result;
 use std::os::linux::fs::MetadataExt;
 use std::path::PathBuf;
 
@@ -48,8 +49,13 @@ pub async fn format_tty(tty_nr: i32, pid: u32) -> Result<String> {
 }
 
 async fn load_tty_drivers() -> Result<Vec<TtyDriver>> {
-    let file = File::open("/proc/tty/drivers").await?;
-    read_tty_drivers(BufReader::new(file)).await
+    const PATH: &str = "/proc/tty/drivers";
+    let file = File::open(PATH)
+        .await
+        .with_context(|| format!("cannot open file {}", PATH))?;
+    read_tty_drivers(BufReader::new(file))
+        .await
+        .with_context(|| format!("read error for {}", PATH))
 }
 
 async fn read_tty_drivers<R: AsyncReadExt + Unpin>(reader: BufReader<R>) -> Result<Vec<TtyDriver>> {
@@ -68,16 +74,22 @@ async fn read_tty_drivers<R: AsyncReadExt + Unpin>(reader: BufReader<R>) -> Resu
     let mut lines = reader.lines();
     while let Some(line) = lines.next().await {
         if let Some(caps) = RECORD_RE.captures(&line?) {
-            let mut name = caps.get(1).unwrap().as_str().to_string();
+            let caps = CapturesAdapter::new(caps);
+            let mut name = caps.str_by_index(1).to_string();
             let is_devfs = name.ends_with("%d");
             if is_devfs {
                 name.truncate(name.len() - "%d".len());
             }
-            let major = caps.get(2).unwrap().as_str().parse::<i32>().unwrap();
-            let minor_first = caps.get(3).unwrap().as_str().parse::<i32>().unwrap();
-            let minor_last = caps
-                .get(5)
-                .map_or(minor_first, |m| m.as_str().parse::<i32>().unwrap());
+            let major = caps.int_by_index::<i32>(2)?;
+            let minor_first = caps.int_by_index::<i32>(3)?;
+            let minor_last = match caps.get(5) {
+                Some(m) => {
+                    let v = m.as_str();
+                    v.parse::<i32>()
+                        .with_context(|| format!("cannot parse minor_last (value: {})", v))?
+                }
+                None => minor_first,
+            };
             let record = TtyDriver {
                 name,
                 major,
