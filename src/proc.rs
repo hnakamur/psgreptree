@@ -5,8 +5,7 @@ use futures_lite::*;
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
-use smol::fs;
-use smol::fs::{read_dir, DirEntry};
+use smol::fs::{self, DirEntry};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
@@ -250,16 +249,27 @@ struct OutputLineRecord {
 }
 
 impl ProcessForest {
-    pub async fn new(pattern: &str) -> Self {
-        let pids = all_pids().await.unwrap();
-        let procs = all_procs(pids).await.unwrap();
-        let matched_pids = match_cmdline(&procs, pattern);
-        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids)
-            .await
-            .unwrap();
-        let btime = stat::get_btime().await.unwrap();
+    pub async fn new(re: &Regex) -> Result<Self> {
+        let pids = all_pids().await?;
+        let procs = all_procs(pids).await?;
+        let matched_pids = match_cmdline(&procs, re);
+        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids).await?;
+        let btime = stat::get_btime().await?;
         let now = Local::now();
-        build_process_forest(wanted_procs, btime, now)
+        let herz = sysconf(SysconfVar::CLK_TCK)
+            .context("Failed to get sysconf CLK_TCK")?
+            .context("No value for CLK_TCK")?;
+        let sysinfo = sysinfo::sysinfo().context("Failed to get sysinfo")?;
+        let uptime = sysinfo.uptime();
+        let ram_total = sysinfo.ram_total();
+        Ok(build_process_forest(
+            wanted_procs,
+            btime,
+            now,
+            herz,
+            uptime,
+            ram_total,
+        ))
     }
 
     fn print_forest_helper(
@@ -316,9 +326,11 @@ impl ProcessForest {
 
 async fn all_pids() -> Result<Vec<u32>> {
     let mut pids = Vec::new();
-    let mut entries = read_dir("/proc").await?;
+    let mut entries = fs::read_dir("/proc")
+        .await
+        .context("Failed to read /proc")?;
     while let Some(res) = entries.next().await {
-        let entry = res?;
+        let entry = res.context("Get directory entry in /proc")?;
         if is_pid_entry(&entry) {
             pids.push(entry.file_name().to_str().unwrap().parse::<u32>().unwrap());
         }
@@ -366,16 +378,15 @@ async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
                 };
                 pids.insert(pid, proc);
             }
-            (Err(e), _) => return Err(e).with_context(|| format!("load stat for pid={}", pid)),
+            (Err(e), _) => return Err(e),
             (_, Err(e)) => return Err(e),
         };
     }
     Ok(pids)
 }
 
-fn match_cmdline(procs: &BTreeMap<u32, Process>, pattern: &str) -> BTreeSet<u32> {
+fn match_cmdline(procs: &BTreeMap<u32, Process>, re: &Regex) -> BTreeSet<u32> {
     let mut pids = BTreeSet::new();
-    let re = Regex::new(pattern).expect("valid regular expression");
     let my_pid = process::id();
     for (pid, proc) in procs.iter() {
         if re.is_match(&proc.cmdline) && *pid != my_pid {
@@ -425,7 +436,7 @@ async fn get_matched_and_descendants(
     for (pid, wanted) in marks.iter() {
         if *wanted {
             let mut proc = procs.get(pid).unwrap().clone();
-            let status = status::load_status(*pid).await.expect("read_status");
+            let status = status::load_status(*pid).await?;
             proc.euid = status.euid;
             proc.vm_size = status.vm_size;
             proc.vm_lock = status.vm_lock;
@@ -440,6 +451,9 @@ fn build_process_forest(
     procs: BTreeMap<u32, Process>,
     btime: u64,
     now: DateTime<Local>,
+    herz: i64,
+    uptime: std::time::Duration,
+    ram_total: u64,
 ) -> ProcessForest {
     let mut roots = BTreeSet::new();
     let mut nodes = BTreeMap::new();
@@ -464,18 +478,14 @@ fn build_process_forest(
             );
         }
     }
-    let herz = sysconf(SysconfVar::CLK_TCK)
-        .expect("sysconf CLK_TCK")
-        .unwrap();
-    let sysinfo = sysinfo::sysinfo().expect("sysinfo");
     ProcessForest {
         roots,
         nodes,
         herz,
         btime,
-        uptime: sysinfo.uptime(),
+        uptime,
         now,
-        ram_total: sysinfo.ram_total(),
+        ram_total,
     }
 }
 
@@ -495,7 +505,7 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
     indent
 }
 
-pub async fn get_pid_digits() -> usize {
+async fn get_pid_digits() -> usize {
     const DEFAULT_WIDTH: usize = 5;
     fs::read("/proc/sys/kernel/pid_max")
         .await
