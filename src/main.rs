@@ -4,6 +4,7 @@ extern crate lazy_static;
 use clap::{App, Arg};
 use regex::Regex;
 
+mod human;
 mod proc;
 mod regex_util;
 mod tty;

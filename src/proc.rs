@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, TimeZone};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
+use human_format::{Formatter, Scales};
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
@@ -19,6 +20,23 @@ use crate::user;
 pub mod cmdline;
 pub mod stat;
 pub mod status;
+
+#[derive(Debug, Clone)]
+pub struct ProcessForest {
+    roots: BTreeSet<u32>,
+    nodes: BTreeMap<u32, ProcessForestNode>,
+    herz: i64,
+    btime: u64,
+    uptime: std::time::Duration,
+    now: DateTime<Local>,
+    ram_total: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessForestNode {
+    process: Process,
+    child_pids: Vec<u32>,
+}
 
 #[derive(Debug, Clone)]
 struct Process {
@@ -41,6 +59,180 @@ struct Process {
     vm_size: u64,
     vm_lock: u64,
     vm_rss: u64,
+}
+
+struct OutputLineRecord {
+    uname_or_uid: String,
+    pid: String,
+    cpu_percent: String,
+    mem_percent: String,
+    vsz: String,
+    rss: String,
+    stat: String,
+    tty: String,
+    start_time: String,
+    time: String,
+    cmdline: String,
+}
+
+impl fmt::Display for ProcessForest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut records = Vec::new();
+        for pid in self.roots.iter() {
+            self.print_forest_helper(*pid, vec![], &mut records);
+        }
+        let pid_w = smol::block_on(async { get_pid_digits().await });
+        const COMMAND_LABEL: &str = "COMMAND";
+        writeln!(
+            f,
+            "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:tty_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
+            "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", COMMAND_LABEL,
+            user_w=UNAME_OR_UID_COL_WIDTH,
+            pid_w=pid_w,
+            cpu_w=CPU_PERCENT_COLUMN_WIDTH,
+            mem_w=MEM_PERCENT_COLUMN_WIDTH,
+            vsz_w=VSZ_COLUMN_WIDTH,
+            rss_w=RSS_COLUMN_WIDTH,
+            tty_w=TTY_COLUMN_WIDTH,
+            stat_w=STAT_COLUMN_WIDTH,
+            start_w=START_COLUMN_WIDTH,
+            time_w=TIME_COLUMN_WIDTH,
+        )?;
+        for record in records {
+            let vsz_over = if record.vsz.len() > VSZ_COLUMN_WIDTH {
+                record.vsz.len() - VSZ_COLUMN_WIDTH
+            } else {
+                0
+            };
+            let rss_w = if vsz_over == 0 {
+                RSS_COLUMN_WIDTH
+            } else if vsz_over < RSS_COLUMN_WIDTH {
+                RSS_COLUMN_WIDTH - vsz_over
+            } else {
+                1
+            };
+            let rss_over = if record.rss.len() > rss_w {
+                record.rss.len() - rss_w
+            } else {
+                0
+            };
+            let tty_w = if rss_over == 0 {
+                TTY_COLUMN_WIDTH
+            } else if rss_over < TTY_COLUMN_WIDTH {
+                TTY_COLUMN_WIDTH - rss_over
+            } else {
+                1
+            };
+            writeln!(
+                f,
+                "{} {:>pid_w$} {} {} {:>vsz_w$} {:>rss_w$} {:tty_w$} {} {} {} {}",
+                record.uname_or_uid,
+                record.pid,
+                record.cpu_percent,
+                record.mem_percent,
+                record.vsz,
+                record.rss,
+                record.tty,
+                record.stat,
+                record.start_time,
+                record.time,
+                record.cmdline,
+                pid_w = pid_w,
+                vsz_w = VSZ_COLUMN_WIDTH,
+                rss_w = rss_w,
+                tty_w = tty_w,
+            )?;
+        }
+        Ok(())
+    }
+}
+impl ProcessForest {
+    pub async fn new(re: &Regex) -> Result<Self> {
+        let pids = all_pids().await?;
+        let procs = all_procs(pids).await?;
+        let matched_pids = match_cmdline(&procs, re);
+        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids).await?;
+        let btime = stat::get_btime().await?;
+        let now = Local::now();
+        let herz = sysconf(SysconfVar::CLK_TCK)
+            .context("Failed to get sysconf CLK_TCK")?
+            .context("No value for CLK_TCK")?;
+        let sysinfo = sysinfo::sysinfo().context("Failed to get sysinfo")?;
+        let uptime = sysinfo.uptime();
+        let ram_total = sysinfo.ram_total();
+        Ok(build_process_forest(
+            wanted_procs,
+            btime,
+            now,
+            herz,
+            uptime,
+            ram_total,
+        ))
+    }
+
+    fn print_forest_helper(
+        &self,
+        pid: u32,
+        last_child: Vec<bool>,
+        records: &mut Vec<OutputLineRecord>,
+    ) {
+        let node = self.nodes.get(&pid).unwrap();
+        records.push(OutputLineRecord {
+            uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
+            pid: format!("{}", pid),
+            cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
+            mem_percent: node.process.format_mem_percent(self.ram_total),
+            vsz: format_human_bytes(node.process.vm_size), // format!("{}", node.process.vm_size),
+            rss: format_human_bytes(node.process.vm_rss), // format!("{}", node.process.vm_rss),
+            tty: smol::block_on(async {
+                tty::format_tty(node.process.tty_nr, node.process.pid)
+                    .await
+                    .unwrap()
+            }),
+            stat: format!(
+                "{:stat_w$}",
+                node.process.format_stat(),
+                stat_w = STAT_COLUMN_WIDTH
+            ),
+            start_time: format!(
+                "{:start_w$}",
+                node.process
+                    .format_start_time(self.herz, self.btime, self.now,),
+                start_w = START_COLUMN_WIDTH
+            ),
+            time: format!(
+                "{:>time_w$}",
+                node.process.format_time(self.herz),
+                time_w = TIME_COLUMN_WIDTH
+            ),
+            cmdline: format!(
+                "{}{}",
+                last_child_to_indent(&last_child),
+                node.process.cmdline
+            ),
+        });
+        let mut i = 0;
+        while i < node.child_pids.len() {
+            let child_pid = node.child_pids[i];
+            let mut last_child2 = last_child.clone();
+            last_child2.push(i == node.child_pids.len() - 1);
+            self.print_forest_helper(child_pid, last_child2, records);
+            i += 1;
+        }
+    }
+}
+
+fn format_human_bytes(kb: u64) -> String {
+    let mut custom_binary_scales = Scales::new();
+    custom_binary_scales
+        .with_base(1024)
+        .with_suffixes(["", "K", "M", "G", "T", "P", "E", "Z", "Y"].to_vec());
+
+    Formatter::new()
+        .with_decimals(0)
+        .with_separator("")
+        .with_scales(custom_binary_scales)
+        .format((kb * 1024) as f64)
 }
 
 const UNAME_OR_UID_COL_WIDTH: usize = 8;
@@ -141,186 +333,6 @@ impl Process {
         let u = (t as i64) / herz;
 
         format!("{:3}:{:02}", u / 60, u % 60)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ProcessForest {
-    roots: BTreeSet<u32>,
-    nodes: BTreeMap<u32, ProcessForestNode>,
-    herz: i64,
-    btime: u64,
-    uptime: std::time::Duration,
-    now: DateTime<Local>,
-    ram_total: u64,
-}
-
-#[derive(Debug, Clone)]
-struct ProcessForestNode {
-    process: Process,
-    child_pids: Vec<u32>,
-}
-
-const COMMAND_LABEL: &str = "COMMAND";
-
-impl fmt::Display for ProcessForest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut records = Vec::new();
-        for pid in self.roots.iter() {
-            self.print_forest_helper(*pid, vec![], &mut records);
-        }
-        let pid_w = smol::block_on(async { get_pid_digits().await });
-        writeln!(
-            f,
-            "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:tty_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
-            "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", COMMAND_LABEL,
-            user_w=UNAME_OR_UID_COL_WIDTH,
-            pid_w=pid_w,
-            cpu_w=CPU_PERCENT_COLUMN_WIDTH,
-            mem_w=MEM_PERCENT_COLUMN_WIDTH,
-            vsz_w=VSZ_COLUMN_WIDTH,
-            rss_w=RSS_COLUMN_WIDTH,
-            tty_w=TTY_COLUMN_WIDTH,
-            stat_w=STAT_COLUMN_WIDTH,
-            start_w=START_COLUMN_WIDTH,
-            time_w=TIME_COLUMN_WIDTH,
-        )?;
-        for record in records {
-            let vsz_over = if record.vsz.len() > VSZ_COLUMN_WIDTH {
-                record.vsz.len() - VSZ_COLUMN_WIDTH
-            } else {
-                0
-            };
-            let rss_w = if vsz_over == 0 {
-                RSS_COLUMN_WIDTH
-            } else if vsz_over < RSS_COLUMN_WIDTH {
-                RSS_COLUMN_WIDTH - vsz_over
-            } else {
-                1
-            };
-            let rss_over = if record.rss.len() > rss_w {
-                record.rss.len() - rss_w
-            } else {
-                0
-            };
-            let tty_w = if rss_over == 0 {
-                TTY_COLUMN_WIDTH
-            } else if rss_over < TTY_COLUMN_WIDTH {
-                TTY_COLUMN_WIDTH - rss_over
-            } else {
-                1
-            };
-            writeln!(
-                f,
-                "{} {:>pid_w$} {} {} {:>vsz_w$} {:>rss_w$} {:tty_w$} {} {} {} {}",
-                record.uname_or_uid,
-                record.pid,
-                record.cpu_percent,
-                record.mem_percent,
-                record.vsz,
-                record.rss,
-                record.tty,
-                record.stat,
-                record.start_time,
-                record.time,
-                record.cmdline,
-                pid_w = pid_w,
-                vsz_w = VSZ_COLUMN_WIDTH,
-                rss_w = rss_w,
-                tty_w = tty_w,
-            )?;
-        }
-        Ok(())
-    }
-}
-
-struct OutputLineRecord {
-    uname_or_uid: String,
-    pid: String,
-    cpu_percent: String,
-    mem_percent: String,
-    vsz: String,
-    rss: String,
-    stat: String,
-    tty: String,
-    start_time: String,
-    time: String,
-    cmdline: String,
-}
-
-impl ProcessForest {
-    pub async fn new(re: &Regex) -> Result<Self> {
-        let pids = all_pids().await?;
-        let procs = all_procs(pids).await?;
-        let matched_pids = match_cmdline(&procs, re);
-        let wanted_procs = get_matched_and_descendants(&procs, &matched_pids).await?;
-        let btime = stat::get_btime().await?;
-        let now = Local::now();
-        let herz = sysconf(SysconfVar::CLK_TCK)
-            .context("Failed to get sysconf CLK_TCK")?
-            .context("No value for CLK_TCK")?;
-        let sysinfo = sysinfo::sysinfo().context("Failed to get sysinfo")?;
-        let uptime = sysinfo.uptime();
-        let ram_total = sysinfo.ram_total();
-        Ok(build_process_forest(
-            wanted_procs,
-            btime,
-            now,
-            herz,
-            uptime,
-            ram_total,
-        ))
-    }
-
-    fn print_forest_helper(
-        &self,
-        pid: u32,
-        last_child: Vec<bool>,
-        records: &mut Vec<OutputLineRecord>,
-    ) {
-        let node = self.nodes.get(&pid).unwrap();
-        records.push(OutputLineRecord {
-            uname_or_uid: node.process.format_uname_or_uid(node.process.euid),
-            pid: format!("{}", pid),
-            cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
-            mem_percent: node.process.format_mem_percent(self.ram_total),
-            vsz: format!("{}", node.process.vm_size),
-            rss: format!("{}", node.process.vm_rss),
-            tty: smol::block_on(async {
-                tty::format_tty(node.process.tty_nr, node.process.pid)
-                    .await
-                    .unwrap()
-            }),
-            stat: format!(
-                "{:stat_w$}",
-                node.process.format_stat(),
-                stat_w = STAT_COLUMN_WIDTH
-            ),
-            start_time: format!(
-                "{:start_w$}",
-                node.process
-                    .format_start_time(self.herz, self.btime, self.now,),
-                start_w = START_COLUMN_WIDTH
-            ),
-            time: format!(
-                "{:>time_w$}",
-                node.process.format_time(self.herz),
-                time_w = TIME_COLUMN_WIDTH
-            ),
-            cmdline: format!(
-                "{}{}",
-                last_child_to_indent(&last_child),
-                node.process.cmdline
-            ),
-        });
-        let mut i = 0;
-        while i < node.child_pids.len() {
-            let child_pid = node.child_pids[i];
-            let mut last_child2 = last_child.clone();
-            last_child2.push(i == node.child_pids.len() - 1);
-            self.print_forest_helper(child_pid, last_child2, records);
-            i += 1;
-        }
     }
 }
 
