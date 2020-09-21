@@ -14,7 +14,6 @@ use std::process;
 use std::str;
 use std::sync::Mutex;
 
-use crate::tty;
 use crate::user;
 
 pub mod cmdline;
@@ -28,7 +27,6 @@ struct Process {
     ppid: u32,
     pgrp: u32,
     session: u32,
-    tty_nr: i32,
     tpgid: i32,
     utime: u64,
     stime: u64,
@@ -48,8 +46,7 @@ const UNAME_OR_UID_COL_WIDTH: usize = 8;
 const CPU_PERCENT_COLUMN_WIDTH: usize = 4;
 const MEM_PERCENT_COLUMN_WIDTH: usize = 4;
 const VSZ_COLUMN_WIDTH: usize = 6;
-const RSS_COLUMN_WIDTH: usize = 5;
-const TTY_COLUMN_WIDTH: usize = 8;
+const RSS_COLUMN_WIDTH: usize = 6;
 const STAT_COLUMN_WIDTH: usize = 4;
 const START_COLUMN_WIDTH: usize = 5;
 const TIME_COLUMN_WIDTH: usize = 6;
@@ -173,15 +170,14 @@ impl fmt::Display for ProcessForest {
         let pid_w = smol::block_on(async { get_pid_digits().await });
         writeln!(
             f,
-            "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:tty_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
-            "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", COMMAND_LABEL,
+            "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
+            "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "STAT", "START", "TIME", COMMAND_LABEL,
             user_w=UNAME_OR_UID_COL_WIDTH,
             pid_w=pid_w,
             cpu_w=CPU_PERCENT_COLUMN_WIDTH,
             mem_w=MEM_PERCENT_COLUMN_WIDTH,
             vsz_w=VSZ_COLUMN_WIDTH,
             rss_w=RSS_COLUMN_WIDTH,
-            tty_w=TTY_COLUMN_WIDTH,
             stat_w=STAT_COLUMN_WIDTH,
             start_w=START_COLUMN_WIDTH,
             time_w=TIME_COLUMN_WIDTH,
@@ -199,28 +195,15 @@ impl fmt::Display for ProcessForest {
             } else {
                 1
             };
-            let rss_over = if record.rss.len() > rss_w {
-                record.rss.len() - rss_w
-            } else {
-                0
-            };
-            let tty_w = if rss_over == 0 {
-                TTY_COLUMN_WIDTH
-            } else if rss_over < TTY_COLUMN_WIDTH {
-                TTY_COLUMN_WIDTH - rss_over
-            } else {
-                1
-            };
             writeln!(
                 f,
-                "{} {:>pid_w$} {} {} {:>vsz_w$} {:>rss_w$} {:tty_w$} {} {} {} {}",
+                "{} {:>pid_w$} {} {} {:>vsz_w$} {:>rss_w$} {} {} {} {}",
                 record.uname_or_uid,
                 record.pid,
                 record.cpu_percent,
                 record.mem_percent,
                 record.vsz,
                 record.rss,
-                record.tty,
                 record.stat,
                 record.start_time,
                 record.time,
@@ -228,7 +211,6 @@ impl fmt::Display for ProcessForest {
                 pid_w = pid_w,
                 vsz_w = VSZ_COLUMN_WIDTH,
                 rss_w = rss_w,
-                tty_w = tty_w,
             )?;
         }
         Ok(())
@@ -243,7 +225,6 @@ struct OutputLineRecord {
     vsz: String,
     rss: String,
     stat: String,
-    tty: String,
     start_time: String,
     time: String,
     cmdline: String,
@@ -287,11 +268,6 @@ impl ProcessForest {
             mem_percent: node.process.format_mem_percent(self.ram_total),
             vsz: format_bytes_human(i64::try_from(node.process.vm_size).unwrap() * 1024),
             rss: format_bytes_human(i64::try_from(node.process.vm_rss).unwrap() * 1024),
-            tty: smol::block_on(async {
-                tty::format_tty(node.process.tty_nr, node.process.pid)
-                    .await
-                    .unwrap()
-            }),
             stat: format!(
                 "{:stat_w$}",
                 node.process.format_stat(),
@@ -378,7 +354,6 @@ async fn all_procs(all_pids: Vec<u32>) -> Result<BTreeMap<u32, Process>> {
                     state: stat.state,
                     pgrp: stat.pgrp,
                     session: stat.session,
-                    tty_nr: stat.tty_nr,
                     tpgid: stat.tpgid,
                     utime: stat.utime,
                     stime: stat.stime,
@@ -571,7 +546,6 @@ mod test {
                 cmdline: String::from("init"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -595,7 +569,6 @@ mod test {
                 cmdline: String::from("foo"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -619,7 +592,6 @@ mod test {
                 cmdline: String::from("bar"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -643,7 +615,6 @@ mod test {
                 cmdline: String::from("baz"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -667,7 +638,6 @@ mod test {
                 cmdline: String::from("hoge"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -691,7 +661,6 @@ mod test {
                 cmdline: String::from("huga"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -715,7 +684,6 @@ mod test {
                 cmdline: String::from("yay"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -739,7 +707,6 @@ mod test {
                 cmdline: String::from("ls"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -763,7 +730,6 @@ mod test {
                 cmdline: String::from("cat"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,
@@ -787,7 +753,6 @@ mod test {
                 cmdline: String::from("top"),
                 pgrp: 0,
                 session: 0,
-                tty_nr: 0,
                 tpgid: 0,
                 utime: 0,
                 stime: 0,

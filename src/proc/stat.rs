@@ -12,7 +12,6 @@ pub struct Stat {
     pub ppid: u32,
     pub pgrp: u32,
     pub session: u32,
-    pub tty_nr: i32,
     pub tpgid: i32,
     pub utime: u64,
     pub stime: u64,
@@ -53,7 +52,6 @@ async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<
     let ppid = caps.int_by_name::<u32>("ppid")?;
     let pgrp = caps.int_by_name::<u32>("pgrp")?;
     let session = caps.int_by_name::<u32>("session")?;
-    let tty_nr = caps.int_by_name::<i32>("tty_nr")?;
     let tpgid = caps.int_by_name::<i32>("tpgid")?;
     let utime = caps.int_by_name::<u64>("utime")?;
     let stime = caps.int_by_name::<u64>("stime")?;
@@ -66,7 +64,6 @@ async fn read_stat<R: AsyncReadExt + Unpin>(mut reader: BufReader<R>) -> Result<
         ppid,
         pgrp,
         session,
-        tty_nr,
         tpgid,
         utime,
         stime,
@@ -109,7 +106,6 @@ mod test {
             ppid: 2,
             pgrp: 0,
             session: 0,
-            tty_nr: 0,
             tpgid: -1,
             utime: 1,
             stime: 0,

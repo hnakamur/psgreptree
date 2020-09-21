@@ -6,7 +6,6 @@ use regex::Regex;
 
 mod proc;
 mod regex_util;
-mod tty;
 mod user;
 
 fn main() {

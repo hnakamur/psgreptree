@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use regex::{Captures, Match};
+use regex::Captures;
 use std::error::Error;
 use std::str::FromStr;
 
@@ -10,10 +10,6 @@ pub struct CapturesAdapter<'t> {
 impl<'t> CapturesAdapter<'t> {
     pub fn new(caps: Captures<'t>) -> Self {
         Self { caps }
-    }
-
-    pub fn get(&self, i: usize) -> Option<Match> {
-        self.caps.get(i)
     }
 
     pub fn int_by_index<F: FromStr>(&self, i: usize) -> Result<F>
