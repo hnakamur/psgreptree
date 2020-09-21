@@ -314,12 +314,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "human_format"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86cce260d758a9aa3d7c4b99d55c815a540f8a37514ba6046ab6be402a157cb0"
-
-[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -427,7 +421,6 @@ dependencies = [
  "chrono",
  "clap",
  "futures-lite",
- "human_format",
  "lazy_static",
  "nix",
  "num_cpus",
