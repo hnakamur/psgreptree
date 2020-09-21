@@ -25,3 +25,7 @@ shellwords = "1.1.0"
 nix = "0.18.0"
 chrono = "0.4.15"
 anyhow = "1.0.32"
+humanize_number = "0.1.0"
+
+[patch.crates-io]
+humanize_number = { path = '../humanize_number' }

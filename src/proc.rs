@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, TimeZone};
 use futures_lite::stream::{self, StreamExt};
 use futures_lite::*;
+use humanize_number::{humanize_number, Flags, Scale};
 use nix::sys::sysinfo;
 use nix::unistd::{sysconf, SysconfVar, Uid};
 use regex::Regex;
@@ -284,8 +285,8 @@ impl ProcessForest {
             pid: format!("{}", pid),
             cpu_percent: node.process.format_cpu_percent(self.herz, self.uptime),
             mem_percent: node.process.format_mem_percent(self.ram_total),
-            vsz: format!("{}", node.process.vm_size),
-            rss: format!("{}", node.process.vm_rss),
+            vsz: format_bytes_human(i64::try_from(node.process.vm_size).unwrap() * 1024),
+            rss: format_bytes_human(i64::try_from(node.process.vm_rss).unwrap() * 1024),
             tty: smol::block_on(async {
                 tty::format_tty(node.process.tty_nr, node.process.pid)
                     .await
@@ -322,6 +323,20 @@ impl ProcessForest {
             i += 1;
         }
     }
+}
+
+fn format_bytes_human(bytes: i64) -> String {
+    let mut buf = String::new();
+    humanize_number(
+        &mut buf,
+        6,
+        bytes,
+        "",
+        Scale::AutoScale,
+        Flags::DECIMAL | Flags::NOSPACE | Flags::IEC_PREFIXES,
+    )
+    .unwrap();
+    buf
 }
 
 async fn all_pids() -> Result<Vec<u32>> {
