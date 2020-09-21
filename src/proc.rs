@@ -43,13 +43,6 @@ struct Process {
 }
 
 const UNAME_OR_UID_COL_WIDTH: usize = 8;
-const CPU_PERCENT_COLUMN_WIDTH: usize = 4;
-const MEM_PERCENT_COLUMN_WIDTH: usize = 4;
-const VSZ_COLUMN_WIDTH: usize = 6;
-const RSS_COLUMN_WIDTH: usize = 6;
-const STAT_COLUMN_WIDTH: usize = 4;
-const START_COLUMN_WIDTH: usize = 5;
-const TIME_COLUMN_WIDTH: usize = 6;
 
 impl Process {
     fn format_uname_or_uid(&self, uid: Uid) -> String {
@@ -138,7 +131,7 @@ impl Process {
         let t = self.utime + self.stime;
         let u = (t as i64) / herz;
 
-        format!("{:3}:{:02}", u / 60, u % 60)
+        format!("{}:{:02}", u / 60, u % 60)
     }
 }
 
@@ -159,7 +152,9 @@ struct ProcessForestNode {
     child_pids: Vec<u32>,
 }
 
-const COMMAND_LABEL: &str = "COMMAND";
+const HEADER_LABELS: [&str; 10] = [
+    "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "STAT", "START", "TIME", "COMMAND",
+];
 
 impl fmt::Display for ProcessForest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -167,37 +162,34 @@ impl fmt::Display for ProcessForest {
         for pid in self.roots.iter() {
             self.print_forest_helper(*pid, vec![], &mut records);
         }
-        let pid_w = smol::block_on(async { get_pid_digits().await });
+        let widths = column_widths(&HEADER_LABELS[0..9], &records);
         writeln!(
             f,
             "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
-            "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "STAT", "START", "TIME", COMMAND_LABEL,
-            user_w=UNAME_OR_UID_COL_WIDTH,
-            pid_w=pid_w,
-            cpu_w=CPU_PERCENT_COLUMN_WIDTH,
-            mem_w=MEM_PERCENT_COLUMN_WIDTH,
-            vsz_w=VSZ_COLUMN_WIDTH,
-            rss_w=RSS_COLUMN_WIDTH,
-            stat_w=STAT_COLUMN_WIDTH,
-            start_w=START_COLUMN_WIDTH,
-            time_w=TIME_COLUMN_WIDTH,
+            HEADER_LABELS[0],
+            HEADER_LABELS[1],
+            HEADER_LABELS[2],
+            HEADER_LABELS[3],
+            HEADER_LABELS[4],
+            HEADER_LABELS[5],
+            HEADER_LABELS[6],
+            HEADER_LABELS[7],
+            HEADER_LABELS[8],
+            HEADER_LABELS[9],
+            user_w=widths[0],
+            pid_w=widths[1],
+            cpu_w=widths[2],
+            mem_w=widths[3],
+            vsz_w=widths[4],
+            rss_w=widths[5],
+            stat_w=widths[6],
+            start_w=widths[7],
+            time_w=widths[8],
         )?;
         for record in records {
-            let vsz_over = if record.vsz.len() > VSZ_COLUMN_WIDTH {
-                record.vsz.len() - VSZ_COLUMN_WIDTH
-            } else {
-                0
-            };
-            let rss_w = if vsz_over == 0 {
-                RSS_COLUMN_WIDTH
-            } else if vsz_over < RSS_COLUMN_WIDTH {
-                RSS_COLUMN_WIDTH - vsz_over
-            } else {
-                1
-            };
             writeln!(
                 f,
-                "{} {:>pid_w$} {} {} {:>vsz_w$} {:>rss_w$} {} {} {} {}",
+                "{:user_w$} {:>pid_w$} {:cpu_w$} {:mem_w$} {:>vsz_w$} {:>rss_w$} {:stat_w$} {:start_w$} {:>time_w$} {}",
                 record.uname_or_uid,
                 record.pid,
                 record.cpu_percent,
@@ -208,13 +200,35 @@ impl fmt::Display for ProcessForest {
                 record.start_time,
                 record.time,
                 record.cmdline,
-                pid_w = pid_w,
-                vsz_w = VSZ_COLUMN_WIDTH,
-                rss_w = rss_w,
+                user_w=widths[0],
+                pid_w=widths[1],
+                cpu_w=widths[2],
+                mem_w=widths[3],
+                vsz_w=widths[4],
+                rss_w=widths[5],
+                stat_w=widths[6],
+                start_w=widths[7],
+                time_w=widths[8],
             )?;
         }
         Ok(())
     }
+}
+
+fn column_widths(header_labels: &[&str], records: &[OutputLineRecord]) -> Vec<usize> {
+    let mut widths: Vec<usize> = header_labels.into_iter().map(|label| label.len()).collect();
+    for record in records {
+        widths[0] = widths[0].max(record.uname_or_uid.len());
+        widths[1] = widths[1].max(record.pid.len());
+        widths[2] = widths[2].max(record.cpu_percent.len());
+        widths[3] = widths[3].max(record.mem_percent.len());
+        widths[4] = widths[4].max(record.vsz.len());
+        widths[5] = widths[5].max(record.rss.len());
+        widths[6] = widths[6].max(record.stat.len());
+        widths[7] = widths[7].max(record.start_time.len());
+        widths[8] = widths[8].max(record.time.len());
+    }
+    widths
 }
 
 struct OutputLineRecord {
@@ -268,22 +282,11 @@ impl ProcessForest {
             mem_percent: node.process.format_mem_percent(self.ram_total),
             vsz: format_bytes_human(i64::try_from(node.process.vm_size).unwrap() * 1024),
             rss: format_bytes_human(i64::try_from(node.process.vm_rss).unwrap() * 1024),
-            stat: format!(
-                "{:stat_w$}",
-                node.process.format_stat(),
-                stat_w = STAT_COLUMN_WIDTH
-            ),
-            start_time: format!(
-                "{:start_w$}",
-                node.process
-                    .format_start_time(self.herz, self.btime, self.now,),
-                start_w = START_COLUMN_WIDTH
-            ),
-            time: format!(
-                "{:>time_w$}",
-                node.process.format_time(self.herz),
-                time_w = TIME_COLUMN_WIDTH
-            ),
+            stat: node.process.format_stat(),
+            start_time: node
+                .process
+                .format_start_time(self.herz, self.btime, self.now),
+            time: node.process.format_time(self.herz),
             cmdline: format!(
                 "{}{}",
                 last_child_to_indent(&last_child),
@@ -495,42 +498,9 @@ fn last_child_to_indent(last_child: &[bool]) -> String {
     indent
 }
 
-async fn get_pid_digits() -> usize {
-    const DEFAULT_WIDTH: usize = 5;
-    fs::read("/proc/sys/kernel/pid_max")
-        .await
-        .map_or(DEFAULT_WIDTH, |data| {
-            str::from_utf8(&data).map_or(DEFAULT_WIDTH, |text| {
-                text.trim()
-                    .parse::<u32>()
-                    .map_or(DEFAULT_WIDTH, |max_pid| column_width_for_u32(max_pid - 1))
-            })
-        })
-}
-
-fn column_width_for_u32(n: u32) -> usize {
-    let mut width = 1;
-    let mut n = n / 10;
-    while n > 0 {
-        width += 1;
-        n /= 10;
-    }
-    width
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_column_width_for_u32() {
-        assert_eq!(column_width_for_u32(0), 1);
-        assert_eq!(column_width_for_u32(1), 1);
-        assert_eq!(column_width_for_u32(9), 1);
-        assert_eq!(column_width_for_u32(10), 2);
-        assert_eq!(column_width_for_u32(99), 2);
-        assert_eq!(column_width_for_u32(100), 3);
-    }
 
     #[test]
     fn test_process_forest_fmt() {
